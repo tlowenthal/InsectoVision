@@ -159,7 +159,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--write_conf",
         action="store_true",
-        help="Enable verbose output"
+        help="Add confidence for each bounding box prediction in the output txt files"
     )
 
     # Parse arguments and run the main function
