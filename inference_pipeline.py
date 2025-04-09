@@ -33,7 +33,7 @@ def main(args):
     os.makedirs("output")
 
     if args.high_precision:
-        args.model = "model/best_0.89.pt"
+        args.model = os.path.join("model", "best_0.89.pt")
         args.img_size = 640
         args.detection_only = True
 
@@ -107,14 +107,14 @@ def main(args):
         # cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Example script with default arguments.")
+    parser = argparse.ArgumentParser(description="python inference_pipeline.py --input_folder my_image_folder")
 
     # Add command-line arguments
     parser.add_argument(
         "--conf",
         type=float,
         default=0.125,
-        help="Intersection over Union threshold (default: 0.125)"
+        help="Confidence threshold (default: 0.125)"
     )
     parser.add_argument(
         "--max_overlap",
@@ -125,8 +125,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         type=str,
-        default="model/current_best.pt",
-        help="Detection model (default: current_best.pt)"
+        default=os.path.join("model", "current_best.pt"),
+        help="Path to detection model (default: current_best.pt, in the model directory)"
     )
     parser.add_argument(
         "--img_size",
