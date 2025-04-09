@@ -94,7 +94,8 @@ def main(args):
             indices = list(np.where(predictions == 1)[0]) if len(predictions) > 0 else []
             pred_list = [old_list[i] for i in range(len(old_list)) if i in indices]
 
-        api.save_yolo_format(pred_list, image_size, os.path.join("output", image_file[:-4] + ".txt"))
+        api.save_yolo_format(pred_list, image_size,
+                             os.path.join("output", image_file[:-4] + ".txt"), write_conf=args.write_conf)
 
         end = time.time()
         print(f"Time elapsed: {end - start:.4f} seconds")
@@ -152,6 +153,11 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--verbose",
+        action="store_true",
+        help="Enable verbose output"
+    )
+    parser.add_argument(
+        "--write_conf",
         action="store_true",
         help="Enable verbose output"
     )

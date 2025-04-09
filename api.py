@@ -192,7 +192,7 @@ def save_regions(image, boxes, output_path, output_length):
         cv2.imwrite(output_path + "/i" + str(output_length + i) + ".jpg", cropped_region)
     return output_length + len(boxes)
 
-def save_yolo_format(bboxes, image_size, output_txt_path, class_id=0):
+def save_yolo_format(bboxes, image_size, output_txt_path, class_id=0, write_conf=False):
     """
     Saves bounding boxes in YOLO format to a .txt file.
 
@@ -223,7 +223,10 @@ def save_yolo_format(bboxes, image_size, output_txt_path, class_id=0):
             height /= img_height
 
             # Write to file
-            f.write(f"{class_id} {x_center:.6f} {y_center:.6f} {width:.6f} {height:.6f}\n")
+            line_to_write = f"{class_id} {x_center:.6f} {y_center:.6f} {width:.6f} {height:.6f}"
+            if write_conf:
+                line_to_write += f" {conf:.6f}"
+            f.write(line_to_write + "\n")
 
 
 import numpy as np
