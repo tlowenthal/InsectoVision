@@ -1,3 +1,7 @@
+#Local Data
+MiniSample
+output
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
