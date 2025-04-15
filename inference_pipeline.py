@@ -18,9 +18,12 @@ import preprocess
 import time
 
 def main(args):
+    main(args.input_folder,args.model,args.high_precision,args.img_size,args.detection_only,args.verbose,args.conf)
+
+def main(input_folder,model=os.path.join("model", "current_best.pt"),high_precision=False,img_size=640,detection_only=False,verbose=False,conf = 0.125,write_conf=False):
     # Example usage of the parsed arguments
 
-    model = YOLO(args.model)
+    model = YOLO(model)
 
     if os.path.exists("output"):
         ans = input("Output file already exists, do you wish to replace (r) or cancel (c) ?\n")
@@ -32,30 +35,30 @@ def main(args):
             shutil.rmtree("output")
     os.makedirs("output")
 
-    if args.high_precision:
-        args.model = os.path.join("model", "best_0.89.pt")
-        args.img_size = 640
-        args.detection_only = True
+    if high_precision:
+        model = os.path.join("model", "best_0.89.pt")
+        img_size = 640
+        detection_only = True
 
-    for image_file in os.listdir(args.input_folder):
+    for image_file in os.listdir(input_folder):
 
         #if image_file != "example_image.jpg":
         #    continue
 
         start = time.time()
 
-        image_path = os.path.join(args.input_folder, image_file)
+        image_path = os.path.join(input_folder, image_file)
         image = Image.open(image_path)
         image_size = image.size
 
-        if args.high_precision:
+        if high_precision:
             img_array = np.array(image, dtype=np.float32)  # Convert to numpy array
             factor = np.max(img_array.shape) / 2016 if np.max(img_array.shape) > 2016 else 1
             img_array = tf.image.resize(img_array, (int(img_array.shape[0] / factor), int(img_array.shape[1] / factor)),
                                         method=tf.image.ResizeMethod.BILINEAR)
 
             fcnn = tfk.models.load_model("fcnn.keras")
-            preds = fcnn.predict(np.expand_dims(img_array, axis=0), verbose=args.verbose)
+            preds = fcnn.predict(np.expand_dims(img_array, axis=0), verbose=verbose)
             preds = np.squeeze(preds)
             heatmap = tf.image.resize(np.expand_dims(preds[:, :, 1], axis=-1), (img_array.shape[0], img_array.shape[1]),
                                       method=tf.image.ResizeMethod.BILINEAR)
@@ -67,16 +70,16 @@ def main(args):
 
         cv_image = cv2.imread(image_path)  # Load image
         cv_image_rgb = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
-        results = model.predict(source=image, conf=0.001, imgsz=args.img_size, iou=0.25,
-                                max_det=1000, verbose=args.verbose)
+        results = model.predict(source=image, conf=0.001, imgsz=img_size, iou=0.25,
+                                max_det=1000, verbose=verbose)
         pred_list = api.store_predictions(results)
         pred_list = [api.yolo_to_bbox(x, image_size[0], image_size[1]) for x in pred_list]
-        pred_list = [x for x in pred_list if x[-1] > args.conf]
+        pred_list = [x for x in pred_list if x[-1] > conf]
         pred_list = api.remove_overlapping_regions(pred_list)
         pred_list = api.filter_bboxes_zscore(pred_list)
         old_list = list(pred_list)
 
-        if not args.detection_only:
+        if not detection_only:
             classifier_name = "pretrained.keras"
             classifier = tfk.models.load_model(classifier_name)
             preprocess_func = preprocess.dic[classifier_name]
@@ -95,7 +98,7 @@ def main(args):
             pred_list = [old_list[i] for i in range(len(old_list)) if i in indices]
 
         api.save_yolo_format(pred_list, image_size,
-                             os.path.join("output", image_file[:-4] + ".txt"), write_conf=args.write_conf)
+                             os.path.join("output", image_file[:-4] + ".txt"), write_conf=write_conf)
 
         end = time.time()
         print(f"Time elapsed: {end - start:.4f} seconds")
