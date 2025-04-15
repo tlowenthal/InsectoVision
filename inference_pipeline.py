@@ -39,8 +39,8 @@ def main(args):
 
     for image_file in os.listdir(args.input_folder):
 
-        if image_file != "example_image.jpg":
-            continue
+        #if image_file != "example_image.jpg":
+        #    continue
 
         start = time.time()
 
