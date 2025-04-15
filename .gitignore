@@ -1,6 +1,7 @@
 #Local Data
 MiniSample
 output
+guiout
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
