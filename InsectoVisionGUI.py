@@ -1,7 +1,9 @@
 import os
+from shutil import rmtree
 from tkinter import *
 from tkinter import ttk
 from PIL import ImageTk, Image
+import inference_pipeline
 
 #Constants
 x_max = 1800
@@ -309,6 +311,7 @@ def add_label():
     ttk.Label(tfrm,text="Enter label name").grid(row=0,column=0)
     e = ttk.Entry(tfrm)
     e.grid(row=1,column=0)
+    e.focus()
 
     def conf_label():
         for bbox in selected:
@@ -316,6 +319,7 @@ def add_label():
         label_window.destroy()
 
     ttk.Button(tfrm,text="Ok",command=conf_label).grid(row=2,column=0)
+
 
 def update_thresh(val):
     global conf_threshold 
@@ -345,6 +349,12 @@ def start_draw(reason = NEW_BBOX):
     drawing = 1
 
 
+
+#if os.path.exists("output"):
+    #rmtree("output")
+
+#inference_pipeline.main(img_path,write_conf=True)
+
 #Setup the window
 root = Tk()
 root.title("InsectoVision")
@@ -356,6 +366,8 @@ for entry in os.listdir(img_path):
     if(entry.endswith(".jpg")):
         entoboxes.append(EntoBox(entry[:len(entry)-4]))
 n_img = len(entoboxes)
+
+
 
 #Title and buttons
 title_label = ttk.Label(frm, text="Image "+str(current+1)+" /"+str(n_img))
