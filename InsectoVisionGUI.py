@@ -140,8 +140,9 @@ class GUI:
 
     def choose_input(self):
         self.img_path = fd.askdirectory()
-        self.load_images()            
+        print("Input directory selected")
         inference_pipeline.main(self.img_path,write_conf=True)
+        self.load_images()
         if(not self.started):
            self.start()
 
