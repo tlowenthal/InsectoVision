@@ -7,8 +7,6 @@ from PIL import ImageTk, Image
 import inference_pipeline
 
 #Constants
-x_max = 1800
-y_max = 900
 DEFAULT_LABEL = "undefined"
 
 
@@ -25,8 +23,8 @@ COLORS = {SURE:"chartreuse4",DOUBT:"gold",CONFIRMED:"green2",REJECTED:"red",SELE
 
 BWIDTH = 15 #Button width
 PADX = 5 #x axis padding between buttons/labels
-NONCANVASHEIGHT = 100
-NONCANVASWIDTH = 20
+NONCANVASHEIGHT = 150
+NONCANVASWIDTH = 30
 
 class EntoBox:
 
@@ -40,6 +38,7 @@ class EntoBox:
         #Get the image
         img = Image.open(os.path.join(img_path,name+".jpg"))
         self.dim = gui.get_dim((img.size))
+        print(self.dim)
         self.image = ImageTk.PhotoImage(img.resize(self.dim))
         
         #Get the bboxes
@@ -125,9 +124,6 @@ class GUI:
     draw_coord = None
     draw_indic = None
 
-    x_max 
-    y_max 
-
     def __init__(self):
         root = Tk()
         root.minsize(300,150)
@@ -191,7 +187,7 @@ class GUI:
 
     def make_canvas(self):
         #Canvas for bounding boxes
-        self.canvas = Canvas(self.root,height=y_max,width=x_max)
+        self.canvas = Canvas(self.root,height=self.y_max,width=self.x_max)
         self.canvas.grid(column=0,row=2,padx=20)
         self.canvas.bind('<Button-1>',self.on_click)
         self.canvas.bind('<Shift-Button-1>',self.select_many)
