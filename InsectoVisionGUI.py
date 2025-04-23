@@ -141,6 +141,8 @@ class GUI:
     def choose_input(self):
         self.img_path = fd.askdirectory()
         print("Input directory selected")
+        if os.path.exists("output"):
+            rmtree("output")
         inference_pipeline.main(self.img_path,write_conf=True)
         self.load_images()
         if(not self.started):
@@ -399,8 +401,7 @@ if __name__ == "__main__":
     gui = GUI()
     img_path = "MiniSample"
 
-    if os.path.exists("output"):
-        rmtree("output")
+
 
 
     
