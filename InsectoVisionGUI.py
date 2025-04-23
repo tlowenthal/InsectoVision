@@ -25,19 +25,21 @@ COLORS = {SURE:"chartreuse4",DOUBT:"gold",CONFIRMED:"green2",REJECTED:"red",SELE
 
 BWIDTH = 15 #Button width
 PADX = 5 #x axis padding between buttons/labels
+NONCANVASHEIGHT = 100
+NONCANVASWIDTH = 20
 
 class EntoBox:
 
     to_add = []
 
 
-    def __init__(self,name,img_path,bbox_path,ct):
+    def __init__(self,name,img_path,bbox_path,ct,gui):
         self.name = name
         print("Loading "+name)
 
         #Get the image
         img = Image.open(os.path.join(img_path,name+".jpg"))
-        self.dim = get_dim((img.size))
+        self.dim = gui.get_dim((img.size))
         self.image = ImageTk.PhotoImage(img.resize(self.dim))
         
         #Get the bboxes
@@ -123,11 +125,17 @@ class GUI:
     draw_coord = None
     draw_indic = None
 
+    x_max 
+    y_max 
+
     def __init__(self):
         root = Tk()
+        root.minsize(300,150)
         root.title("InsectoVision")
-        frm = ttk.Frame(root, padding=10)
+        frm = ttk.Frame(root, padding=1)
         frm.grid()
+        self.y_max = root.winfo_screenheight()-NONCANVASHEIGHT
+        self.x_max = root.winfo_screenwidth()-NONCANVASWIDTH
         self.root = root
         self.frame = frm
 
@@ -159,7 +167,7 @@ class GUI:
     def load_images(self):
         for entry in os.listdir(self.img_path):
             if(entry.endswith(".jpg")):
-                self.entoboxes.append(EntoBox(entry[:len(entry)-4],self.img_path,self.bbox_path,self.conf_threshold))
+                self.entoboxes.append(EntoBox(entry[:len(entry)-4],self.img_path,self.bbox_path,self.conf_threshold,self))
         self.n_img = len(self.entoboxes)
 
     def make_interface(self):
@@ -183,7 +191,7 @@ class GUI:
 
     def make_canvas(self):
         #Canvas for bounding boxes
-        self.canvas = Canvas(self.root,width=x_max,height=y_max) #TODO check if root or maybe frame?
+        self.canvas = Canvas(self.root,height=y_max,width=x_max)
         self.canvas.grid(column=0,row=2,padx=20)
         self.canvas.bind('<Button-1>',self.on_click)
         self.canvas.bind('<Shift-Button-1>',self.select_many)
@@ -385,13 +393,12 @@ class GUI:
     def start_draw(self,reason = NEW_BBOX):
         self.drawing_reason = reason
         self.drawing = 1
-
-
-def get_dim(dim):
-    x = dim[0]
-    y = dim[1]
-    scale = min(x_max/x,y_max/y)
-    return(int(x*scale),int(y*scale))
+    
+    def get_dim(self,dim):
+        x = dim[0]
+        y = dim[1]
+        scale = min(self.x_max/x,self.y_max/y)
+        return(int(x*scale),int(y*scale))
 
 
 
