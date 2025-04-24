@@ -20,14 +20,23 @@ import time
 def main(args):
     # Example usage of the parsed arguments
 
-    model = YOLO(args.model)
+    if args.model.endswith(".pt"):
+        to_be_ensembled = [args.model]
+    else:
+        to_be_ensembled = [os.path.join(args.model, x) for x in os.listdir(args.model) if x.endswith(".pt")]
+        if len(to_be_ensembled) == 0:
+            raise ValueError("Directory to ensemble does not contain .pt models")
+    to_be_ensembled = [YOLO(x) for x in to_be_ensembled]
 
     if os.path.exists("output"):
-        ans = input("Output file already exists, do you wish to replace (r) or cancel (c) ?\n")
-        while not (ans == 'r' or ans == 'c'):
-            input("Invalid response, choose between replace (r) or cancel (c)\n")
-        if ans == 'c':
-            exit()
+        if not args.silent:
+            ans = input("Output file already exists, do you wish to replace (r) or cancel (c) ?\n")
+            while not (ans == 'r' or ans == 'c'):
+                input("Invalid response, choose between replace (r) or cancel (c)\n")
+            if ans == 'c':
+                exit()
+            else:
+                shutil.rmtree("output")
         else:
             shutil.rmtree("output")
     os.makedirs("output")
@@ -39,8 +48,8 @@ def main(args):
 
     for image_file in os.listdir(args.input_folder):
 
-        if image_file != "example_image.jpg":
-            continue
+        # if image_file != "example_image.jpg":
+        #     continue
 
         start = time.time()
 
@@ -67,13 +76,17 @@ def main(args):
 
         cv_image = cv2.imread(image_path)  # Load image
         cv_image_rgb = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
-        results = model.predict(source=image, conf=0.001, imgsz=args.img_size, iou=0.25,
-                                max_det=1000, verbose=args.verbose)
-        pred_list = api.store_predictions(results)
-        pred_list = [api.yolo_to_bbox(x, image_size[0], image_size[1]) for x in pred_list]
-        pred_list = [x for x in pred_list if x[-1] > args.conf]
+        pred_list = []
+        for model in to_be_ensembled:
+            results = model.predict(source=image, conf=0.001, imgsz=args.img_size, iou=0.25,
+                                    max_det=1000, verbose=args.verbose)
+            pred = api.store_predictions(results)
+            pred = [api.yolo_to_bbox(x, image_size[0], image_size[1]) for x in pred]
+            pred = [x for x in pred if x[-1] > args.conf]
+            pred = api.remove_overlapping_regions(pred)
+            pred = api.filter_bboxes_zscore(pred)
+            pred_list.extend(pred)
         pred_list = api.remove_overlapping_regions(pred_list)
-        pred_list = api.filter_bboxes_zscore(pred_list)
         old_list = list(pred_list)
 
         if not args.detection_only:
@@ -98,7 +111,8 @@ def main(args):
                              os.path.join("output", image_file[:-4] + ".txt"), write_conf=args.write_conf)
 
         end = time.time()
-        print(f"Time elapsed: {end - start:.4f} seconds")
+        if not args.silent:
+            print(f"Time elapsed: {end - start:.4f} seconds")
 
         # cv_image = cv2.imread(os.path.join(args.input_folder, image_file))  # Load image
         # api.draw_bboxes(cv_image, pred_list, (255, 0, 0), 5)
@@ -160,6 +174,11 @@ if __name__ == "__main__":
         "--write_conf",
         action="store_true",
         help="Add confidence for each bounding box prediction in the output txt files"
+    )
+    parser.add_argument(
+        "--silent",
+        action="store_true",
+        help="Nothing printed in stdout"
     )
 
     # Parse arguments and run the main function

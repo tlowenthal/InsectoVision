@@ -86,7 +86,7 @@ def is_inside_and_centered(box1, box2):
     ret &= compute_iou(box1, shift_down) > 0
     return ret
 
-def is_largely_contained(box1, box2, threshold=0.7):
+def is_largely_contained(box1, box2, threshold=0.5):
 
     if box1 is None or box2 is None:
         return False
@@ -104,11 +104,15 @@ def is_largely_contained(box1, box2, threshold=0.7):
     box2_area = (x2g - x1g) * (y2g - y1g)
     return inter_area/box1_area > threshold or inter_area/box2_area > threshold
 
-LABEL_BIAS = True
+LABEL_BIAS = False
 def evaluate_detections(pred_boxes, gt_boxes, iou_threshold=0.5, iosa_threshold=0.7):
     """ Compute precision, recall, and IoU-based accuracy. """
     tp, fp, fn = 0, 0, 0
     matched_preds = set()
+
+    pred_boxes = sorted(pred_boxes, key=lambda x: x[4], reverse=True)
+    tps = []
+    fps = []
 
     for gt in gt_boxes:
         best_iou = 0
@@ -125,6 +129,24 @@ def evaluate_detections(pred_boxes, gt_boxes, iou_threshold=0.5, iosa_threshold=
         if (best_iou >= iou_threshold or bias_condition) and best_match not in matched_preds:
             tp += 1
             matched_preds.add(best_match)
+            tps.append(1)
+            fps.append(0)
+        else:
+            tps.append(0)
+            fps.append(1)
+
+    tps = np.cumsum(tps)
+    fps = np.cumsum(fps)
+
+    recalls = tps / len(gt_boxes)
+    precisions = tps / (tps + fps + 1e-6)
+
+    # Interpolate precision (COCO-style 101-point interpolation optional)
+    ap = 0.0
+    for t in np.linspace(0, 1, 101):
+        p = precisions[recalls >= t]
+        ap += max(p) if p.size else 0
+    ap /= 101
 
     fp_list = [pred_boxes[i] for i in range(len(pred_boxes)) if i not in matched_preds]
     fp = len(fp_list)
@@ -134,7 +156,20 @@ def evaluate_detections(pred_boxes, gt_boxes, iou_threshold=0.5, iosa_threshold=
     recall = tp / (tp + fn) if (tp + fn) > 0 else 1
     f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
 
-    return fp_list, {"precision": precision, "recall": recall, "f1_score": f1_score}
+    return fp_list, {"precision": precision, "recall": recall, "f1_score": f1_score, "ap": ap}
+
+def compute_map_50_95(pred_list, gt_list):
+    aps = []
+    for iou in np.arange(0.5, 1.0, 0.05):
+        _, metrics = evaluate_detections(pred_list, gt_list, iou_threshold=iou)
+        ap = metrics["ap"]
+        aps.append(ap)
+    return np.mean(aps)
+
+def compute_map_50(pred_list, gt_list):
+    _, metrics = evaluate_detections(pred_list, gt_list, iou_threshold=0.5)
+    ap = metrics["ap"]
+    return np.mean(ap)
 
 def txt_to_tuple_list(file_name):
     ret_list = []
@@ -145,11 +180,37 @@ def txt_to_tuple_list(file_name):
                 ret_list.append(tuple([float(x) for x in row[1:]]))
     return ret_list
 
-def draw_bboxes(image, bboxes, color=(0, 255, 0), thickness=2):
+def draw_bboxes(image, bboxes, color=(0, 255, 0), thickness=2, show_conf=False):
     """ Draw bounding boxes on an image and display it. """
 
-    for (x_min, y_min, x_max, y_max, _) in bboxes:
+    for (x_min, y_min, x_max, y_max, conf) in bboxes:
         cv2.rectangle(image, (int(x_min), int(y_min)), (int(x_max), int(y_max)), color, thickness)
+
+        if show_conf:
+
+            # Prepare the confidence score text
+            label = f"{conf:.2f}"
+
+            # Choose font and size
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 2
+            font_thickness = 4
+
+            # Get the size of the text box
+            (text_width, text_height), _ = cv2.getTextSize(label, font, font_scale, font_thickness)
+
+            # Draw background rectangle for text (optional, improves readability)
+            cv2.rectangle(image,
+                          (int(x_min), int(y_min) - text_height - 8),
+                          (int(x_min) + text_width, int(y_min)),
+                          color,
+                          cv2.FILLED)
+
+            # Put the text above the top-left corner of the bounding box
+            cv2.putText(image, label,
+                        (int(x_min), int(y_min) - 6),
+                        font, font_scale,
+                        (0, 0, 0), font_thickness, lineType=cv2.LINE_AA)
 
 def resize_image_opencv(image_path, output_size=(2016, 1216)):
     """ Resize an image to the given dimensions using OpenCV. """
@@ -160,7 +221,7 @@ def resize_image_opencv(image_path, output_size=(2016, 1216)):
 def remove_overlapping_regions(bboxes, overlap_treshold=0.1):
     ret_list = []
     bboxes = sorted(bboxes, key=lambda x: x[4])
-    for i in range(len(bboxes)-1):
+    for i in range(len(bboxes)):
         overlap_found = False
         for j in range(i+1, len(bboxes)):
             if is_largely_contained(bboxes[i], bboxes[j]):
@@ -253,9 +314,3 @@ def get_bbox_class_probs(pred_list, saliency_map, threshold=0.5):
         class_probs.append(label)
 
     return class_probs
-
-def draw_bboxes(image, bboxes, color=(0, 255, 0), thickness=2):
-    """ Draw bounding boxes on an image and display it. """
-
-    for (x_min, y_min, x_max, y_max, _) in bboxes:
-        cv2.rectangle(image, (int(x_min), int(y_min)), (int(x_max), int(y_max)), color, thickness)
