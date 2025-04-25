@@ -1,4 +1,8 @@
+import os
+import shutil
+
 import cv2
+import tensorflow as tf
 import numpy as np
 from PIL import Image
 
@@ -245,11 +249,14 @@ def filter_bboxes_zscore(bboxes, threshold=5):
 
     return filtered_bboxes
 
-def save_regions(image, boxes, output_path, output_length):
+def save_regions(image, boxes, output_path, output_length, resize=None):
 
     for i, region in enumerate(boxes):
         x_min, y_min, x_max, y_max, _ = map(int, region)
         cropped_region = image[y_min:y_max, x_min:x_max]
+        if resize is not None:
+            cropped_region = tf.image.resize_with_pad(cropped_region, resize[0], resize[1])
+            cropped_region = np.asarray(cropped_region, dtype=np.uint8)
         cv2.imwrite(output_path + "/i" + str(output_length + i) + ".jpg", cropped_region)
     return output_length + len(boxes)
 
@@ -314,3 +321,18 @@ def get_bbox_class_probs(pred_list, saliency_map, threshold=0.5):
         class_probs.append(label)
 
     return class_probs
+
+
+def warn_user_if_directory_exists(dir, silent=False):
+    if os.path.exists(dir):
+        if not silent:
+            ans = input(f"{dir} file already exists, do you wish to replace (r) or cancel (c) ?\n")
+            while not (ans == 'r' or ans == 'c'):
+                input("Invalid response, choose between replace (r) or cancel (c)\n")
+            if ans == 'c':
+                exit()
+            else:
+                shutil.rmtree(dir)
+        else:
+            shutil.rmtree(dir)
+    os.makedirs(dir)

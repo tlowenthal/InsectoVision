@@ -28,18 +28,7 @@ def main(args):
             raise ValueError("Directory to ensemble does not contain .pt models")
     to_be_ensembled = [YOLO(x) for x in to_be_ensembled]
 
-    if os.path.exists("output"):
-        if not args.silent:
-            ans = input("Output file already exists, do you wish to replace (r) or cancel (c) ?\n")
-            while not (ans == 'r' or ans == 'c'):
-                input("Invalid response, choose between replace (r) or cancel (c)\n")
-            if ans == 'c':
-                exit()
-            else:
-                shutil.rmtree("output")
-        else:
-            shutil.rmtree("output")
-    os.makedirs("output")
+    api.warn_user_if_directory_exists("output", silent=args.silent)
 
     if args.high_precision:
         args.model = os.path.join("model", "best_0.89.pt")
@@ -121,7 +110,8 @@ def main(args):
         # cv2.waitKey(0)
         # cv2.destroyAllWindows()
 
-if __name__ == "__main__":
+
+def parse_args():
     parser = argparse.ArgumentParser(description="python inference_pipeline.py --input_folder my_image_folder")
 
     # Add command-line arguments
@@ -181,6 +171,10 @@ if __name__ == "__main__":
         help="Nothing printed in stdout"
     )
 
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
     # Parse arguments and run the main function
-    args = parser.parse_args()
+    args = parse_args()
     main(args)
