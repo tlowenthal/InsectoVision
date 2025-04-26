@@ -326,7 +326,7 @@ def get_bbox_class_probs(pred_list, saliency_map, threshold=0.5):
 def warn_user_if_directory_exists(dir, silent=False):
     if os.path.exists(dir):
         if not silent:
-            ans = input(f"{dir} file already exists, do you wish to replace (r) or cancel (c) ?\n")
+            ans = input(f"{dir} folder already exists, do you wish to replace (r) or cancel (c) ?\n")
             while not (ans == 'r' or ans == 'c'):
                 input("Invalid response, choose between replace (r) or cancel (c)\n")
             if ans == 'c':
@@ -336,3 +336,16 @@ def warn_user_if_directory_exists(dir, silent=False):
         else:
             shutil.rmtree(dir)
     os.makedirs(dir)
+
+def warn_user_if_file_exists(file, silent=False):
+    if os.path.exists(file):
+        if not silent:
+            ans = input(f"{file} file already exists, do you wish to replace (r) or cancel (c) ?\n")
+            while not (ans == 'r' or ans == 'c'):
+                input("Invalid response, choose between replace (r) or cancel (c)\n")
+            if ans == 'c':
+                exit()
+            else:
+                os.remove(file)
+        else:
+            os.remove(file)

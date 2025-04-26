@@ -67,7 +67,7 @@ def main(args):
         cv_image_rgb = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
         pred_list = []
         for model in to_be_ensembled:
-            results = model.predict(source=image, conf=0.001, imgsz=args.img_size, iou=0.25,
+            results = model.predict(source=image, conf=0.001, imgsz=args.img_size, iou=args.max_overlap,
                                     max_det=1000, verbose=args.verbose)
             pred = api.store_predictions(results)
             pred = [api.yolo_to_bbox(x, image_size[0], image_size[1]) for x in pred]
@@ -79,17 +79,19 @@ def main(args):
         old_list = list(pred_list)
 
         if not args.detection_only:
-            classifier_name = "pretrained.keras"
+            classifier_name = args.classifier
             classifier = tfk.models.load_model(classifier_name)
-            preprocess_func = preprocess.dic[classifier_name]
+            #preprocess_func = preprocess.dic[classifier_name]
 
             resized_pred_regions = []
             for region in pred_list:
                 x_min, y_min, x_max, y_max, _ = map(int, region)
                 cropped_region = cv_image_rgb[y_min:y_max, x_min:x_max].astype(np.float32)
+                cropped_region = tf.image.resize_with_pad(cropped_region, 256, 256)
                 # resized_region = process_image(cropped_region)
                 resized_pred_regions.append(cropped_region)
-            resized_pred_regions = preprocess_func(resized_pred_regions)
+            #resized_pred_regions = preprocess_func(resized_pred_regions)
+            resized_pred_regions = np.asarray(resized_pred_regions, dtype=np.float32)
             predictions = np.argmax(classifier.predict(resized_pred_regions, verbose=0), axis=-1) if len(
                 resized_pred_regions) > 0 else np.array([])
             # print(model.predict(resized_pred_regions, verbose=0).astype(np.float64))
@@ -132,6 +134,12 @@ def parse_args():
         type=str,
         default=os.path.join("model", "current_best.pt"),
         help="Path to detection model (default: current_best.pt, in the model directory)"
+    )
+    parser.add_argument(
+        "--classifier",
+        type=str,
+        default="pretrained.keras",
+        help="Binary classification model for posterior correction. Must be a keras file"
     )
     parser.add_argument(
         "--img_size",

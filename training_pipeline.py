@@ -104,6 +104,8 @@ def main(args):
             sys.exit(1)  # Stops the main script with a non-zero exit code
 
     if not args.detection_only:
+        api.warn_user_if_file_exists("output.keras")
+
         best_model = None
         best_map50 = 0
         run_dir = os.path.join("runs", "detect")
@@ -122,7 +124,7 @@ def main(args):
 
         original_argv = list(sys.argv)
         inference_args = f"inference_pipeline.py --input_folder {os.path.join(args.dataset, 'train', 'images')} " \
-                         f"--model {best_model} --conf 0.01 --img_size {args.img_size} " \
+                         f"--model {best_model} --conf 0.2 --img_size {args.img_size} " \
                          f"--detection_only --write_conf --silent".split()
         sys.argv = list(inference_args)
         if args.verbose:
@@ -138,7 +140,7 @@ def main(args):
                                       os.path.join(args.dataset, 'train', 'labels'), os.path.join("classify", "train"))
 
         inference_args = f"inference_pipeline.py --input_folder {os.path.join(args.dataset, 'val', 'images')} " \
-                         f"--model {best_model} --conf 0.01 --img_size {args.img_size} " \
+                         f"--model {best_model} --conf 0.2 --img_size {args.img_size} " \
                          f"--detection_only --write_conf --silent".split()
         sys.argv = list(inference_args)
         if args.verbose:
@@ -153,12 +155,40 @@ def main(args):
 
         X_train, y_train = training_api.make_image_and_label_array(os.path.join("classify", "train"))
         X_val, y_val = training_api.make_image_and_label_array(os.path.join("classify", "val"))
-        train_label_ratios = np.sum(y_train, axis=0) / len(y_train)
-        val_label_ratios = np.sum(y_val, axis=0) / len(y_val)
         y_train = tfk.utils.to_categorical(y_train, num_classes=2)
         y_val = tfk.utils.to_categorical(y_val, num_classes=2)
+        train_label_ratios = np.sum(y_train, axis=0) / len(y_train)
+        val_label_ratios = np.sum(y_val, axis=0) / len(y_val)
+
+        # Plot 10 random images
+        # labels_txt = ["false positive", "true positive"]
+        # random_indices = np.random.choice(np.arange(len(X_train)), size=10, replace=False)
+        # training_api.plot_images(X_train[random_indices], [labels_txt[int(np.argmax(y_train,axis=-1)[x])] for x in random_indices])
+        # random_indices = np.random.choice(np.arange(len(X_val)), size=10, replace=False)
+        # training_api.plot_images(X_val[random_indices], [labels_txt[int(np.argmax(y_val,axis=-1)[x])] for x in random_indices])
+
 
         np.random.seed(seed)
+
+        # Undersampling to achieve target ratio in training set
+        target_ratio = [0.25, 0.75]
+        nfp_train = int(train_label_ratios[0] * len(y_train))
+        ntp_train = len(y_train) - nfp_train
+        if train_label_ratios[0] > target_ratio[0]:
+            indices_nfp_train = np.random.permutation(nfp_train)
+            X_train[:nfp_train] = X_train[indices_nfp_train]
+            y_train[:nfp_train] = y_train[indices_nfp_train]
+            to_remove = int(nfp_train - (target_ratio[0]/target_ratio[1]) * ntp_train)
+            X_train = X_train[to_remove:]
+            y_train = y_train[to_remove:]
+        elif train_label_ratios[1] > target_ratio[1]:
+            indices_ntp_train = np.random.permutation(ntp_train) + nfp_train
+            X_train[nfp_train:] = X_train[indices_ntp_train]
+            y_train[nfp_train:] = y_train[indices_ntp_train]
+            to_remove = int(ntp_train - (target_ratio[1] / target_ratio[0]) * nfp_train)
+            X_train = X_train[:-to_remove]
+            y_train = y_train[:-to_remove]
+        train_label_ratios = np.sum(y_train, axis=0) / len(y_train)
 
         # Create a permutation of indices
         indices_train = np.random.permutation(len(X_train))
@@ -167,13 +197,6 @@ def main(args):
         indices_val = np.random.permutation(len(X_val))
         X_val = X_val[indices_val]
         y_val = y_val[indices_val]
-
-        # Plot 10 random images
-        # labels_txt = ["false positive", "true positive"]
-        # random_indices = np.random.choice(np.arange(len(X_train)), size=10, replace=False)
-        # training_api.plot_images(X_train[random_indices], [labels_txt[int(y_train[x])] for x in random_indices])
-        # random_indices = np.random.choice(np.arange(len(X_val)), size=10, replace=False)
-        # training_api.plot_images(X_val[random_indices], [labels_txt[int(y_val[x])] for x in random_indices])
 
         if args.verbose:
             print(f"X_train shape: {X_train.shape}, y_train shape: {y_train.shape}")
