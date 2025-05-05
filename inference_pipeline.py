@@ -31,8 +31,6 @@ def main(args):
     api.warn_user_if_directory_exists("output", silent=args.silent)
 
     if args.high_precision:
-        args.model = os.path.join("model", "best_0.89.pt")
-        args.img_size = 640
         args.detection_only = True
 
     for image_file in os.listdir(args.input_folder):
@@ -52,7 +50,8 @@ def main(args):
             img_array = tf.image.resize(img_array, (int(img_array.shape[0] / factor), int(img_array.shape[1] / factor)),
                                         method=tf.image.ResizeMethod.BILINEAR)
 
-            fcnn = tfk.models.load_model("fcnn.keras")
+            #fcnn = tfk.models.load_model("fcnn.keras")
+            fcnn = api.make_fcnn(args.classifier)
             preds = fcnn.predict(np.expand_dims(img_array, axis=0), verbose=args.verbose)
             preds = np.squeeze(preds)
             heatmap = tf.image.resize(np.expand_dims(preds[:, :, 1], axis=-1), (img_array.shape[0], img_array.shape[1]),
@@ -92,7 +91,9 @@ def main(args):
                 resized_pred_regions.append(cropped_region)
             #resized_pred_regions = preprocess_func(resized_pred_regions)
             resized_pred_regions = np.asarray(resized_pred_regions, dtype=np.float32)
-            predictions = np.argmax(classifier.predict(resized_pred_regions, verbose=0), axis=-1) if len(
+            #resized_pred_regions = tf.constant(resized_pred_regions, dtype=tf.float32)
+            #resized_pred_regions = tf.image.resize_with_pad(resized_pred_regions, 256, 256)
+            predictions = np.argmax(classifier.predict(resized_pred_regions, verbose=args.verbose), axis=-1) if len(
                 resized_pred_regions) > 0 else np.array([])
             # print(model.predict(resized_pred_regions, verbose=0).astype(np.float64))
             indices = list(np.where(predictions == 1)[0]) if len(predictions) > 0 else []

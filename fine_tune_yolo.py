@@ -2,14 +2,92 @@ import argparse
 import os
 import shutil
 import subprocess
+import time
+
+import numpy as np
 import pandas as pd
-import training_api
 
 dataset = "yolo_compatible_dataset_cam/dataset.yaml"
 run_dir = os.path.join("runs", "detect")
 abs_run_path = os.path.join(os.getcwd(), run_dir)
+attempt_dir = "attempts"
 
-def train_yolo(freeze_layers, batch_size, lr0, model_path, dataset, gpu, patience, epochs, img_size):
+LOWER_LOAD_ON_FAIL = False
+WAIT_ON_FAIL = 0
+INCREMENT_WAIT = 0
+DECREMENT_BATCH = 1
+MAX_TRY = 4
+
+def run_ok(run_folder):
+    return "confusion_matrix.png" in os.listdir(os.path.join(abs_run_path, run_folder))
+
+
+def last_run_ok():
+    train_folder = os.listdir(abs_run_path)
+    train_folder.sort(key=lambda f: int(f[5:]) if len(f) > 5 else 1)
+    return run_ok(train_folder[-1])
+
+
+def delete_last_run(keep_copy=False):
+    train_folder = os.listdir(abs_run_path)
+    train_folder.sort(key=lambda f: int(f[5:]) if len(f) > 5 else 1)
+    if keep_copy:
+        copy_id = len(os.listdir(attempt_dir))
+        shutil.copytree(os.path.join(abs_run_path, train_folder[-1]),
+                        os.path.join(attempt_dir, train_folder[-1] + f"_{copy_id}"))
+    shutil.rmtree(os.path.join(abs_run_path, train_folder[-1]))
+    return train_folder[-1]
+
+
+def get_last_valid_run():
+    train_folder = os.listdir(abs_run_path)
+    train_folder.sort(key=lambda f: int(f[5:]) if len(f) > 5 else 1, reverse=True)
+    run_id = int(train_folder[0][5:]) if len(train_folder[0]) > 5 else 1
+    for name in train_folder:
+        if run_ok(name):
+            return run_id
+        else:
+            run_id -= 1
+    raise ValueError("The first pipe-lining step could not be completed")
+
+def get_best_model(run_dir=abs_run_path):
+    best_map50 = 0
+    best_model = None
+    best_dir = None
+    for train_dir in os.listdir(run_dir):
+        map50 = get_map50(os.path.join(run_dir, train_dir))
+        if best_map50 < map50:
+            best_map50 = map50
+            best_model = os.path.join(run_dir, train_dir, "weights", "best.pt")
+            best_dir = train_dir
+    print(f"Best model found in {run_dir}, achieved map50 {best_map50}")
+    return best_model, best_dir, best_map50
+
+def get_attempt_id(attempt_name):
+    offset = -1
+    for i in range(len(attempt_name) - 1, -1, -1):
+        if attempt_name[i] == "_":
+            offset = i + 1
+    if offset == -1:
+        raise ValueError("Attempt folder name doesn't have the right format, "
+                         "of the form current_train_someid")
+    return int(attempt_name[offset:])
+
+def get_map50(train_path):
+    results_path = os.path.join(train_path, "results.csv")
+    if not os.path.exists(results_path):
+        return 0
+    df = pd.read_csv(results_path)
+    best_row = df.loc[df['metrics/mAP50(B)'].idxmax()]
+    map50 = best_row['metrics/mAP50(B)']
+    return map50
+
+
+def train_yolo(freeze_layers, batch_size, lr0, model_path, dataset, gpu, patience, epochs, img_size, batch_size_list, try_id=1):
+    print(f"\n\nStarting attempt number {try_id}...")
+    if try_id == 1:
+        if os.path.exists(attempt_dir):
+            shutil.rmtree(attempt_dir)
     path_to_data = os.path.join(dataset, "data.yaml")
     command = (
         f"yolo task=detect mode=train model={model_path} "
@@ -19,24 +97,64 @@ def train_yolo(freeze_layers, batch_size, lr0, model_path, dataset, gpu, patienc
     )
     print(f"Running: {command}")
     subprocess.run(command, shell=True)
-
-
-def log_best_map(run_id, results, batch_size, step, metric='metrics/mAP50(B)'):
-    #results_path = os_independent_path(run_id, "results.csv", run_dir_offset)
-    results_path = os.path.join(run_dir, "train" if run_id == 1 else f"train{run_id}", "results.csv")
-
-    if os.path.exists(results_path):
-        df = pd.read_csv(results_path)
-        best_row = df.loc[df[metric].idxmax()]
-        best_map50 = best_row[metric]
-        tup_to_append = (run_id, 22 - (run_id - 1)*step, batch_size, best_map50)
-        if metric == 'metrics/mAP50(B)':
-            best_map5095 = best_row['metrics/mAP50-95(B)']
-            tup_to_append += (best_map5095, )
-
-        results.append(tup_to_append)
+    if not last_run_ok():
+        if not os.path.exists(attempt_dir):
+            os.makedirs(attempt_dir)
+        max_attempt = MAX_TRY
+        if try_id >= max_attempt:
+            print(f"{max_attempt} runs failed in a row, skipping this pipelining step")
+            train_folder_name = delete_last_run(keep_copy=True)
+            print("Storing best attempt...\n\n")
+            _, best_train_dir, _ = get_best_model(run_dir=attempt_dir)
+            if best_train_dir is None:
+                raise ValueError(f"Pipelining step never completed any epoch")
+            best_attempt_id = get_attempt_id(best_train_dir)
+            batch_size_list.append(batch_size + ((try_id - 1) * DECREMENT_BATCH) - (best_attempt_id * DECREMENT_BATCH))
+            shutil.copytree(os.path.join(attempt_dir, best_train_dir),
+                            os.path.join(abs_run_path, train_folder_name))
+            shutil.rmtree(attempt_dir)
+            #raise ValueError(f"One fine-tuning step failed {max_attempt} times consecutively")
+        else:
+            waiting_time = WAIT_ON_FAIL + (try_id - 1) * INCREMENT_WAIT
+            print(
+                f"\n\nLast fine-tuning step has failed, waiting {waiting_time/60} minutes to cool off computer...")
+            for i in range(waiting_time):
+                time.sleep(1)
+                print(".", end="\n" if (i + 1) % 60 == 0 else "", flush=True)
+            new_batch_size = max(batch_size - DECREMENT_BATCH, 8)
+            if batch_size != new_batch_size:
+                print(f"Batch size will be reduced from {batch_size} to {new_batch_size}")
+            delete_last_run(keep_copy=True)
+            train_yolo(freeze_layers, new_batch_size, lr0, model_path,
+                       dataset, gpu, patience, epochs, img_size, batch_size_list, try_id=try_id + 1)
+    elif os.path.exists(attempt_dir):
+        print(f"Attempt completed, comparing with previous attempts...")
+        run_id = get_last_valid_run()
+        len_run_dir = 5 if run_id == 1 else 5 + len(str(run_id))
+        run_path = os.path.join(abs_run_path, f"train{run_id}" if run_id > 1 else "train")
+        map_50_completed = get_map50(run_path)
+        _, best_attempt_dir, map_50_attempts = get_best_model(run_dir=attempt_dir)
+        if map_50_attempts > map_50_completed:
+            print(f"Previous attempt scored best map50 {map_50_attempts}")
+            shutil.rmtree(run_path)
+            shutil.copy2(os.path.join(attempt_dir, best_attempt_dir), run_path)
+            attempt_id = int(best_attempt_dir[len_run_dir + 1:])
+            batch_size.append(batch_size + ((try_id - 1) * DECREMENT_BATCH) - (attempt_id * DECREMENT_BATCH))
+        else:
+            print(f"This attempt scored best map50 {map_50_completed}")
+            batch_size_list.append(batch_size)
+        shutil.rmtree(attempt_dir)
     else:
-        print(f"Warning: {results_path} not found. Skipping log entry.")
+        batch_size_list.append(batch_size)
+
+
+
+def log_best_map(run_id, results, batch_size, step):
+    #results_path = os_independent_path(run_id, "results.csv", run_dir_offset)
+    train_path = os.path.join(run_dir, "train" if run_id == 1 else f"train{run_id}")
+    best_map50 = get_map50(train_path)
+    tup_to_append = (run_id, 22 - (run_id - 1)*step, batch_size, best_map50)
+    results.append(tup_to_append)
 
 # def os_independent_path(run_id, file_name, offset=2):
 #     up_levels_path = ""
@@ -56,6 +174,8 @@ def main(args):
     #     runs_path = os.path.join(up_levels_path, "runs")
     #     shutil.rmtree(runs_path)
 
+    if os.path.exists(attempt_dir):
+        shutil.rmtree(attempt_dir)
     if os.path.exists(run_dir):
         shutil.rmtree(run_dir)
     os.makedirs(run_dir)
@@ -65,32 +185,42 @@ def main(args):
     batch_size = args.batch_init
     lr0 = args.lr0
     results = []
-    batch_size_list = [int(batch_size)]
+    batch_size_list = []
 
     # First run with yolov8s.pt
-    train_yolo(freeze_layers, batch_size, lr0, args.model, args.dataset, args.gpu, args.patience, args.epochs, args.img_size)
+    train_yolo(freeze_layers, batch_size, lr0, args.model, args.dataset, args.gpu, args.patience, args.epochs, args.img_size, batch_size_list)
 
-    step = 22 // (args.fine_tuning_steps - 1)
+    step = 22 / (args.fine_tuning_steps - 1)
+    freeze_limit = (22 - step * (args.fine_tuning_steps - 1)) - 1
     lr_decrease_factor = (args.lr_final / lr0) ** (1 / args.fine_tuning_steps)
 
     # Run subsequent training iterations from 21 to 0
-    for run_id, freeze_layers in enumerate(range(22 - step, -1, -step), start=2):
+    for run_id, freeze_layers in enumerate(np.arange(22 - step, freeze_limit, -step), start=2):
         # Gradually decrease learning rate
         lr0 *= lr_decrease_factor
 
         # Decrease batch size, but not below 8
         batch_size = max(args.batch_min, batch_size - args.batch_decrease_rate)
-        batch_size_list.append(round(batch_size))
+        #batch_size_list.append(round(batch_size))
 
         # if run_dir_offset == -1:
         #     run_dir_offset = training_api.search_for_upwards_offset("runs")
         # model_path = os_independent_path(run_id - 1, os.path.join("weights", "best.pt"), run_dir_offset)
-        model_path = os.path.join(run_dir, "train" if run_id == 2 else f"train{run_id - 1}", "weights", "best.pt")
-        train_yolo(freeze_layers, round(batch_size), lr0, model_path, args.dataset,
-                   args.gpu, args.patience, args.epochs, args.img_size)
+        model_path, _, _ = get_best_model()
+        if model_path is None:
+            model_path = args.model
+        # attempted_model_path = None
+        # attempted_model_map50 = 0
+        # if os.path.exists("attempts"):
+        #     attempted_model_path, _, attempted_model_map50 = get_best_model(run_dir="attempts")
+        # if model_map50
+        #pretrained_id = get_best_run()
+        #model_path = os.path.join(run_dir, "train" if pretrained_id == 1 else f"train{pretrained_id}", "weights", "best.pt")
+        train_yolo(round(freeze_layers), round(batch_size), lr0, model_path, args.dataset,
+                   args.gpu, args.patience, args.epochs, args.img_size, batch_size_list)
 
     for rid in range(1, args.fine_tuning_steps + 1):
-        log_best_map(rid, results, batch_size_list[rid - 1], step, 'metrics/recall(B)')
+        log_best_map(rid, results, batch_size_list[rid - 1], step)
 
     # Print final results table
     print("\nFinal Training Results:")

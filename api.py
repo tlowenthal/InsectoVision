@@ -3,6 +3,8 @@ import shutil
 
 import cv2
 import tensorflow as tf
+from tensorflow import keras as tfk
+from tensorflow.keras import layers as tfkl
 import numpy as np
 from PIL import Image
 
@@ -106,9 +108,11 @@ def is_largely_contained(box1, box2, threshold=0.5):
     inter_area = max(0, xi2 - xi1) * max(0, yi2 - yi1)
     box1_area = (x2 - x1) * (y2 - y1)
     box2_area = (x2g - x1g) * (y2g - y1g)
+    if box1_area == 0 or box2_area == 0:
+        return True
     return inter_area/box1_area > threshold or inter_area/box2_area > threshold
 
-LABEL_BIAS = False
+LABEL_BIAS = True
 def evaluate_detections(pred_boxes, gt_boxes, iou_threshold=0.5, iosa_threshold=0.7):
     """ Compute precision, recall, and IoU-based accuracy. """
     tp, fp, fn = 0, 0, 0
@@ -222,18 +226,40 @@ def resize_image_opencv(image_path, output_size=(2016, 1216)):
     resized_image = cv2.resize(image, output_size, interpolation=cv2.INTER_LINEAR)
     return resized_image
 
-def remove_overlapping_regions(bboxes, overlap_treshold=0.1):
-    ret_list = []
-    bboxes = sorted(bboxes, key=lambda x: x[4])
+# def remove_overlapping_regions(bboxes, overlap_treshold=0.5):
+#     ret_list = []
+#     bboxes = sorted(bboxes, key=lambda x: x[4])
+#     for i in range(len(bboxes)):
+#         overlap_found = False
+#         for j in range(i+1, len(bboxes)):
+#             if is_largely_contained(bboxes[i], bboxes[j], threshold=overlap_treshold):
+#             #if compute_iou(bboxes[i], bboxes[j]) > 0: #or is_largely_contained(bboxes[i], bboxes[j]):
+#                 overlap_found = True
+#                 break
+#         if not overlap_found:
+#             ret_list.append(bboxes[i])
+#     return ret_list
+
+def remove_overlapping_regions(bboxes, overlap_treshold=0.5):
+    bboxes = sorted(bboxes, key=lambda x: x[4], reverse=True)
+    to_remove = np.zeros(len(bboxes))
     for i in range(len(bboxes)):
-        overlap_found = False
-        for j in range(i+1, len(bboxes)):
-            if is_largely_contained(bboxes[i], bboxes[j]):
-            #if compute_iou(bboxes[i], bboxes[j]) > 0: #or is_largely_contained(bboxes[i], bboxes[j]):
-                overlap_found = True
-                break
-        if not overlap_found:
-            ret_list.append(bboxes[i])
+        if not to_remove[i] == 1:
+            for j in range(i+1, len(bboxes)):
+                if not to_remove[j] == 1 and is_largely_contained(bboxes[i], bboxes[j], threshold=overlap_treshold):
+                    to_remove[j] = 1
+    ret_list = [bboxes[i] for i in range(len(bboxes)) if to_remove[i] == 0]
+    return ret_list
+
+def remove_overlapping_regions_wrt_iou(bboxes, overlap_treshold=0.5):
+    bboxes = sorted(bboxes, key=lambda x: x[4], reverse=True)
+    to_remove = np.zeros(len(bboxes))
+    for i in range(len(bboxes)):
+        if not to_remove[i] == 1:
+            for j in range(i+1, len(bboxes)):
+                if not to_remove[j] == 1 and compute_iou(bboxes[i], bboxes[j]) > overlap_treshold:
+                    to_remove[j] = 1
+    ret_list = [bboxes[i] for i in range(len(bboxes)) if to_remove[i] == 0]
     return ret_list
 
 def filter_bboxes_zscore(bboxes, threshold=5):
@@ -349,3 +375,83 @@ def warn_user_if_file_exists(file, silent=False):
                 os.remove(file)
         else:
             os.remove(file)
+
+def build_fcnn():
+
+    convnet = tfk.applications.EfficientNetB0(
+        include_top=False,
+        weights="imagenet"
+    )
+    convnet.trainable = False
+
+    inputs = tfk.Input(shape=(None, None, 3))
+    x = convnet(inputs, training=False)
+
+    x = tfkl.Conv2D(filters=256, kernel_size=1, activation='gelu', name='conv1')(x)
+    x = tfkl.Dropout(0.2, name='conv1_dropout')(x)
+
+    x = tfkl.Conv2D(filters=128, kernel_size=1, activation='gelu', name='conv2')(x)
+    x = tfkl.Dropout(0.2, name='conv2_dropout')(x)
+
+    outputs = tfkl.Conv2D(filters=2, kernel_size=1, activation='softmax', name='output_conv')(x)
+
+    model = tfk.Model(inputs=inputs, outputs=outputs, name='fcnn_model')
+    return model
+
+
+def transfer_dense_to_conv(dense_layer, conv_layer):
+
+    dense_weights, dense_bias = dense_layer.get_weights()
+    conv_weights = np.expand_dims(np.expand_dims(dense_weights, axis=0), axis=0)  # Reshape for Conv2D
+    conv_layer.set_weights([conv_weights, dense_bias])
+
+def make_fcnn(classifier):
+    fcnn = build_fcnn()
+    extractor = tfk.models.load_model(classifier)
+    for layer_fcnn, layer_orig in zip(fcnn.layers[1].layers, extractor.layers[1].layers):
+        layer_fcnn.set_weights(layer_orig.get_weights())
+
+    transfer_dense_to_conv(extractor.get_layer("dense1"), fcnn.get_layer("conv1"))
+    transfer_dense_to_conv(extractor.get_layer("dense2"), fcnn.get_layer("conv2"))
+    transfer_dense_to_conv(extractor.get_layer("output"), fcnn.get_layer("output_conv"))
+
+    return fcnn
+
+def has_corresponding_image(image_folder, label):
+    for i in os.listdir(image_folder):
+        if i.startswith(label[:-4]):
+            return True
+    return False
+
+def get_images_and_labels(image_folder, label_folder):
+    # Get all image files that have matching label files
+    image_extensions = (".jpg", ".jpeg", ".png")
+    image_files = [
+        f for f in os.listdir(image_folder)
+        if f.lower().endswith(image_extensions) and
+           os.path.exists(os.path.join(label_folder, os.path.splitext(f)[0] + ".txt"))
+    ]
+    label_files = [f for f in os.listdir(label_folder)
+                   if f.endswith(".txt") and
+                   has_corresponding_image(image_folder, f)]
+
+    return image_files, label_files
+
+
+def make_set_from_indices(name, images_dir, labels_dir, indices, silent=True):
+
+    warn_user_if_directory_exists(name, silent=silent)
+    test_images = os.path.join(name, "images")
+    test_labels = os.path.join(name, "labels")
+    os.makedirs(test_images)
+    os.makedirs(test_labels)
+
+    images, labels = get_images_and_labels(images_dir, labels_dir)
+    images.sort()
+    labels.sort()
+
+    for i in indices:
+        shutil.copy2(os.path.join(images_dir, images[i]),
+                     os.path.join(test_images, images[i]))
+        shutil.copy2(os.path.join(labels_dir, labels[i]),
+                     os.path.join(test_labels, labels[i]))

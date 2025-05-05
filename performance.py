@@ -5,26 +5,36 @@ import cv2
 import numpy as np
 
 import api
-
-
 def main(args):
-    nb_images = len(os.listdir(args.images))
+    nb_images = len(os.listdir(args.ground_truth))  # does not take into account empty boxes
     precisions = np.zeros(nb_images)
     recalls = np.zeros(nb_images)
     f1_scores = np.zeros(nb_images)
     map50s = np.zeros(nb_images)
     map50_95s = np.zeros(nb_images)
 
-    for idx, i in enumerate(os.listdir(args.images)):
+    # Get all image files that have matching label files
+    image_extensions = (".jpg", ".jpeg", ".png")
+    image_files = [
+        f for f in os.listdir(args.images)
+        if f.lower().endswith(image_extensions) and
+           os.path.exists(os.path.join(args.ground_truth, os.path.splitext(f)[0] + ".txt"))
+    ]
+
+    for idx, i in enumerate(image_files):
 
         image = cv2.imread(os.path.join(args.images, i))
 
-        pred_list = api.txt_to_tuple_list(os.path.join(args.predictions, i[:-4] + ".txt"))
+        pred_file = os.path.join(args.predictions, i[:-4] + ".txt")
+        pred_list = api.txt_to_tuple_list(pred_file) if os.path.exists(pred_file) else []
         if len(pred_list) > 0 and len(pred_list[0]) == 4:
             pred_list = [x + (1,) for x in pred_list]
         pred_list = [api.yolo_to_bbox(x, image.shape[1], image.shape[0]) for x in pred_list]
+        pred_list = [x for x in pred_list if x[4] > args.min_conf]
+        pred_list = api.remove_overlapping_regions_wrt_iou(pred_list, overlap_treshold=args.max_overlap)
 
-        gt_list = api.txt_to_tuple_list(os.path.join(args.ground_truth, i[:-4] + ".txt"))
+        gt_file = os.path.join(args.ground_truth, i[:-4] + ".txt")
+        gt_list = api.txt_to_tuple_list(gt_file)
         gt_list = [x + (1,) for x in gt_list]
         gt_list = [api.yolo_to_bbox(x, image.shape[1], image.shape[0]) for x in gt_list]
 
@@ -51,7 +61,7 @@ def main(args):
     print("map@50 :", np.mean(map50s))
     print("map@50_95 :", np.mean(map50_95s))
 
-if __name__ == "__main__":
+def parse_args():
     parser = argparse.ArgumentParser(description="python inference_pipeline.py --input_folder my_image_folder")
 
     parser.add_argument(
@@ -77,6 +87,28 @@ if __name__ == "__main__":
         action="store_true",
         help="Enable verbose output"
     )
+    parser.add_argument(
+        "--min_conf",
+        type=float,
+        default=0,
+        help="Minimum confidence threshold for predictions to be taken into account (default: 0)"
+    )
+    parser.add_argument(
+        "--max_overlap",
+        type=float,
+        default=1,
+        help="Maximum overlap between detections (default: 1, which means no overlap threshold)"
+    )
+    parser.add_argument(
+        "--no_map",
+        action="store_true",
+        help="Set this flag when map50 and map50-95 are irrelevant metrics"
+    )
     # Parse arguments and run the main function
-    args = parser.parse_args()
+    return parser.parse_args()
+
+if __name__ == "__main__":
+
+    # Parse arguments and run the main function
+    args = parse_args()
     main(args)

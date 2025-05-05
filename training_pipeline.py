@@ -1,17 +1,23 @@
+import warnings
+warnings.filterwarnings("ignore")
+
 import argparse
 import random
 import shutil
 import subprocess
 import sys
 
+import cv2
 import numpy as np
 import pandas as pd
 import yaml
 from pathlib import Path
 
+from PIL import Image
 from matplotlib import pyplot as plt
 from sklearn.model_selection import train_test_split
 from tensorflow import keras as tfk
+import tensorflow as tf
 import os
 import inference_pipeline
 import api
@@ -20,6 +26,8 @@ import training_api
 seed = 69
 
 def main(args):
+    if args.heatmap_extractor is not None:
+        args.detection_only = True
     if args.detection_only and args.classification_only:
         raise ValueError("--detection_only and --classification_only cannot be specified at the same time,"
                          " as they are mutually exclusive")
@@ -28,67 +36,92 @@ def main(args):
     if args.batch_decrease_rate == -1:
         args.batch_decrease_rate = (args.batch_init - args.batch_min) / (args.fine_tuning_steps - 1)
 
-    # Configuration
-    dataset_dir = args.dataset
-    original_images_dir = os.path.join(dataset_dir, "images")
-    original_labels_dir = os.path.join(dataset_dir, "labels")
-    output_yaml_path = os.path.join(dataset_dir, "data.yaml")
-    class_names = ["insect"]  # Replace with actual class names
-    val_split = 0.2
-    random.seed(seed)
+    if not args.no_split:
+        # Configuration
+        dataset_dir = args.dataset
+        original_images_dir = os.path.join(dataset_dir, "images")
+        original_labels_dir = os.path.join(dataset_dir, "labels")
+        output_yaml_path = os.path.join(dataset_dir, "data.yaml")
+        class_names = ["insect"]  # Replace with actual class names
+        val_split = 0.2
+        random.seed(seed)
 
-    # Get all image files that have matching label files
-    image_extensions = (".jpg", ".jpeg", ".png")
-    image_files = [
-        f for f in os.listdir(original_images_dir)
-        if f.lower().endswith(image_extensions) and
-           os.path.exists(os.path.join(original_labels_dir, os.path.splitext(f)[0] + ".txt"))
-    ]
+        # Get all image files that have matching label files
+        image_files, label_files = api.get_images_and_labels(original_images_dir, original_labels_dir)
 
-    # Split into train and val
-    train_files, val_files = train_test_split(image_files, test_size=val_split, random_state=seed)
+        # Split into train and val
+        train_files, val_files = train_test_split(image_files, test_size=val_split, random_state=seed)
+        # if args.verbose:
+        #     print("Selecting a representative validation set...")
+        # train_files, _, val_files, _ = training_api.make_representative_split(dataset_dir, val_split, seed=seed)
 
-    # Define function to copy files
-    def copy_files(file_list, split_type):
-        images_target = os.path.join(dataset_dir, split_type, "images")
-        labels_target = os.path.join(dataset_dir, split_type, "labels")
-        os.makedirs(images_target, exist_ok=True)
-        os.makedirs(labels_target, exist_ok=True)
+        fcnn = None
+        if args.heatmap_extractor is not None:
+            fcnn = api.make_fcnn(args.heatmap_extractor)
+            if args.verbose:
+                print("Preprocessing images and exctracting features for subsequent training. This may take a while... "
+                      "(+- 2 seconds per image)")
+        # Define function to copy files
+        def copy_files(file_list, split_type):
+            images_target = os.path.join(dataset_dir, split_type, "images")
+            labels_target = os.path.join(dataset_dir, split_type, "labels")
+            os.makedirs(images_target, exist_ok=True)
+            os.makedirs(labels_target, exist_ok=True)
 
-        for filename in file_list:
-            base = os.path.splitext(filename)[0]
-            image_src = os.path.join(original_images_dir, filename)
-            label_src = os.path.join(original_labels_dir, base + ".txt")
+            for filename in file_list:
+                base = os.path.splitext(filename)[0]
+                image_src = os.path.join(original_images_dir, filename)
+                label_src = os.path.join(original_labels_dir, base + ".txt")
 
-            image_dst = os.path.join(images_target, filename)
-            label_dst = os.path.join(labels_target, base + ".txt")
+                image_dst = os.path.join(images_target, filename)
+                label_dst = os.path.join(labels_target, base + ".txt")
 
-            shutil.copy2(image_src, image_dst)
-            shutil.copy2(label_src, label_dst)
+                if args.heatmap_extractor is not None:
+                    cnn_full_img_res = 2016
+                    img = Image.open(image_src)  # Open image
+                    img_array = np.array(img, dtype=np.float32)  # Convert to numpy array
+                    img_shape = img_array.shape[:-1]
+                    factor = np.max(img_array.shape) / cnn_full_img_res if np.max(img_array.shape) > cnn_full_img_res else 1
+                    img_array = tf.image.resize(img_array,
+                                                (int(img_array.shape[0] / factor), int(img_array.shape[1] / factor)),
+                                                method=tf.image.ResizeMethod.BILINEAR)
 
-    # Copy files to new structure
-    copy_files(train_files, "train")
-    copy_files(val_files, "val")
+                    preds = fcnn.predict(np.expand_dims(img_array, axis=0), verbose=1 if args.verbose else 0)
+                    preds = np.squeeze(preds)
 
-    # Get absolute paths for yaml
-    train_images_abs = os.path.abspath(os.path.join(dataset_dir, "train", "images"))
-    val_images_abs = os.path.abspath(os.path.join(dataset_dir, "val", "images"))
+                    heatmap = training_api.extract_heatmap(img_array, np.expand_dims(preds[:, :, 1], axis=-1))
+                    heatmap = tf.image.resize(heatmap, img_shape, method=tf.image.ResizeMethod.BILINEAR)
+                    cv2.imwrite(image_dst, heatmap.numpy())
+                else:
+                    shutil.copy2(image_src, image_dst)
+                shutil.copy2(label_src, label_dst)
 
-    # Write the YAML file
-    data_yaml = {
-        "train": train_images_abs,
-        "val": val_images_abs,
-        "nc": len(class_names),
-        "names": class_names
-    }
+        # Copy files to new structure
+        copy_files(train_files, "train")
+        copy_files(val_files, "val")
 
-    with open(output_yaml_path, "w") as f:
-        yaml.dump(data_yaml, f, sort_keys=False)
+        # Get absolute paths for yaml
+        train_images_abs = os.path.abspath(os.path.join(dataset_dir, "train", "images"))
+        val_images_abs = os.path.abspath(os.path.join(dataset_dir, "val", "images"))
 
-    if args.verbose:
-        print(f"✅ Dataset prepared and YAML saved to: {output_yaml_path}")
+        # Write the YAML file
+        data_yaml = {
+            "train": train_images_abs,
+            "val": val_images_abs,
+            "nc": len(class_names),
+            "names": class_names
+        }
+
+        with open(output_yaml_path, "w") as f:
+            yaml.dump(data_yaml, f, sort_keys=False)
+
+        if args.verbose:
+            print(f"✅ Dataset prepared and YAML saved to: {output_yaml_path}")
 
     if not args.classification_only:
+        api.warn_user_if_directory_exists("runs", silent=args.replace_all)
+        api.warn_user_if_directory_exists("attempts", silent=args.replace_all)
+
         command = (
             f"python fine_tune_yolo.py --model {args.model} "
             f"--dataset {args.dataset} --epochs {args.epochs} --img_size {args.img_size} "
@@ -103,10 +136,10 @@ def main(args):
             print(f"Subprocess failed with return code {e.returncode}")
             sys.exit(1)  # Stops the main script with a non-zero exit code
 
-    if not args.detection_only:
-        api.warn_user_if_file_exists("output.keras")
-
-        best_model = None
+    best_model = None
+    if args.classification_only:
+        best_model = args.model
+    else:
         best_map50 = 0
         run_dir = os.path.join("runs", "detect")
         for train_dir in os.listdir(run_dir):
@@ -118,41 +151,49 @@ def main(args):
                 best_map50 = map50
                 best_model = os.path.join(run_dir, train_dir, "weights", "best.pt")
 
+        api.warn_user_if_file_exists("output.pt", silent=args.replace_all)
+        shutil.copy2(best_model, "output.pt")
         if args.verbose:
-            print("corrector training will be performed on predictions of model", best_model,
-                  "which achieved map50", best_map50)
+            print("Best model ", best_model,
+                  "achieved map50", best_map50, ". It was copied into output.pt")
 
-        original_argv = list(sys.argv)
-        inference_args = f"inference_pipeline.py --input_folder {os.path.join(args.dataset, 'train', 'images')} " \
-                         f"--model {best_model} --conf 0.2 --img_size {args.img_size} " \
-                         f"--detection_only --write_conf --silent".split()
-        sys.argv = list(inference_args)
+    if not args.detection_only:
+        api.warn_user_if_file_exists("output.keras", silent=args.replace_all)
+
+        # original_argv = list(sys.argv)
+        # inference_args = f"inference_pipeline.py --input_folder {os.path.join(args.dataset, 'train', 'images')} " \
+        #                  f"--model {best_model} --conf 0.25 --img_size {args.img_size} " \
+        #                  f"--detection_only --write_conf --silent".split()
+        # sys.argv = list(inference_args)
+        # if args.verbose:
+        #     print("Inferring on training dataset, may take a few seconds...")
+        # inference_args = inference_pipeline.parse_args()
+        # inference_pipeline.main(inference_args)
+        #
+        # api.warn_user_if_directory_exists("classify", silent=args.replace_all)
+        # os.makedirs(os.path.join("classify", "train"))
+        # if args.verbose:
+        #     print("Storing true and false positives for posterior classification training...")
+        # training_api.save_tps_and_fps(os.path.join(args.dataset, 'train', 'images'), "output",
+        #                               os.path.join(args.dataset, 'train', 'labels'), os.path.join("classify", "train"))
+        #
+        # inference_args = f"inference_pipeline.py --input_folder {os.path.join(args.dataset, 'val', 'images')} " \
+        #                  f"--model {best_model} --conf 0.25 --img_size {args.img_size} " \
+        #                  f"--detection_only --write_conf --silent".split()
+        # sys.argv = list(inference_args)
+        # if args.verbose:
+        #     print("Inferring on validation dataset, may take a few seconds...")
+        # inference_args = inference_pipeline.parse_args()
+        # inference_pipeline.main(inference_args)
+        #
+        # if args.verbose:
+        #     print("Storing true and false positives for posterior classification validation...")
+        # training_api.save_tps_and_fps(os.path.join(args.dataset, 'val', 'images'), "output",
+        #                               os.path.join(args.dataset, 'val', 'labels'), os.path.join("classify", "val"))
+
+
         if args.verbose:
-            print("Inferring on training dataset, may take a few seconds...")
-        inference_args = inference_pipeline.parse_args()
-        inference_pipeline.main(inference_args)
-
-        api.warn_user_if_directory_exists("classify")
-        os.makedirs(os.path.join("classify", "train"))
-        if args.verbose:
-            print("Storing true and false positives for posterior classification training...")
-        training_api.save_tps_and_fps(os.path.join(args.dataset, 'train', 'images'), "output",
-                                      os.path.join(args.dataset, 'train', 'labels'), os.path.join("classify", "train"))
-
-        inference_args = f"inference_pipeline.py --input_folder {os.path.join(args.dataset, 'val', 'images')} " \
-                         f"--model {best_model} --conf 0.2 --img_size {args.img_size} " \
-                         f"--detection_only --write_conf --silent".split()
-        sys.argv = list(inference_args)
-        if args.verbose:
-            print("Inferring on validation dataset, may take a few seconds...")
-        inference_args = inference_pipeline.parse_args()
-        inference_pipeline.main(inference_args)
-
-        if args.verbose:
-            print("Storing true and false positives for posterior classification validation...")
-        training_api.save_tps_and_fps(os.path.join(args.dataset, 'val', 'images'), "output",
-                                      os.path.join(args.dataset, 'val', 'labels'), os.path.join("classify", "val"))
-
+            print("Loading cropped bboxes for classification training...")
         X_train, y_train = training_api.make_image_and_label_array(os.path.join("classify", "train"))
         X_val, y_val = training_api.make_image_and_label_array(os.path.join("classify", "val"))
         y_train = tfk.utils.to_categorical(y_train, num_classes=2)
@@ -161,34 +202,54 @@ def main(args):
         val_label_ratios = np.sum(y_val, axis=0) / len(y_val)
 
         # Plot 10 random images
-        # labels_txt = ["false positive", "true positive"]
-        # random_indices = np.random.choice(np.arange(len(X_train)), size=10, replace=False)
-        # training_api.plot_images(X_train[random_indices], [labels_txt[int(np.argmax(y_train,axis=-1)[x])] for x in random_indices])
-        # random_indices = np.random.choice(np.arange(len(X_val)), size=10, replace=False)
-        # training_api.plot_images(X_val[random_indices], [labels_txt[int(np.argmax(y_val,axis=-1)[x])] for x in random_indices])
+        labels_txt = ["false positive", "true positive"]
+        random_indices = np.random.choice(np.arange(len(X_train)), size=10, replace=False)
+        training_api.plot_images(X_train[random_indices], [labels_txt[int(np.argmax(y_train,axis=-1)[x])] for x in random_indices])
+        random_indices = np.random.choice(np.arange(len(X_val)), size=10, replace=False)
+        training_api.plot_images(X_val[random_indices], [labels_txt[int(np.argmax(y_val,axis=-1)[x])] for x in random_indices])
 
 
         np.random.seed(seed)
 
+        # Undersample for a smaller dataset, if the hardware is struggling
+        max_number = args.max_nb_images
+        keep_ratio = max_number / len(y_train)
+        if keep_ratio < 1 and max_number != -1:
+            if args.verbose:
+                print(f"Classifier training set too large, undersampling to max size {max_number}...")
+            remaining_imgs = args.max_nb_images
+            val_ratio = len(y_val) / (len(y_val) + len(y_train))
+            remaining_imgs_val = int(val_ratio * remaining_imgs)
+            remaining_imgs_train = remaining_imgs
+            random_indices = np.random.choice(np.arange(len(y_val)), size=remaining_imgs_val, replace=False)
+            random_indices = np.sort(random_indices)
+            X_val, y_val = X_val[random_indices], y_val[random_indices]
+            random_indices = np.random.choice(np.arange(len(y_train)), size=remaining_imgs_train, replace=False)
+            random_indices = np.sort(random_indices)
+            X_train, y_train = X_train[random_indices], y_train[random_indices]
+
         # Undersampling to achieve target ratio in training set
-        target_ratio = [0.25, 0.75]
-        nfp_train = int(train_label_ratios[0] * len(y_train))
-        ntp_train = len(y_train) - nfp_train
-        if train_label_ratios[0] > target_ratio[0]:
-            indices_nfp_train = np.random.permutation(nfp_train)
-            X_train[:nfp_train] = X_train[indices_nfp_train]
-            y_train[:nfp_train] = y_train[indices_nfp_train]
-            to_remove = int(nfp_train - (target_ratio[0]/target_ratio[1]) * ntp_train)
-            X_train = X_train[to_remove:]
-            y_train = y_train[to_remove:]
-        elif train_label_ratios[1] > target_ratio[1]:
-            indices_ntp_train = np.random.permutation(ntp_train) + nfp_train
-            X_train[nfp_train:] = X_train[indices_ntp_train]
-            y_train[nfp_train:] = y_train[indices_ntp_train]
-            to_remove = int(ntp_train - (target_ratio[1] / target_ratio[0]) * nfp_train)
-            X_train = X_train[:-to_remove]
-            y_train = y_train[:-to_remove]
-        train_label_ratios = np.sum(y_train, axis=0) / len(y_train)
+        if args.tp_ratio != -1:
+            if args.verbose:
+                print(f"Undersampling to achieve target ratio {args.tp_ratio}...")
+            target_ratio = [1 - args.tp_ratio, args.tp_ratio]
+            nfp_train = int(train_label_ratios[0] * len(y_train))
+            ntp_train = len(y_train) - nfp_train
+            if train_label_ratios[0] > target_ratio[0]:
+                indices_nfp_train = np.random.permutation(nfp_train)
+                X_train[:nfp_train] = X_train[indices_nfp_train]
+                y_train[:nfp_train] = y_train[indices_nfp_train]
+                to_remove = int(nfp_train - (target_ratio[0]/target_ratio[1]) * ntp_train)
+                X_train = X_train[to_remove:]
+                y_train = y_train[to_remove:]
+            elif train_label_ratios[1] > target_ratio[1]:
+                indices_ntp_train = np.random.permutation(ntp_train) + nfp_train
+                X_train[nfp_train:] = X_train[indices_ntp_train]
+                y_train[nfp_train:] = y_train[indices_ntp_train]
+                to_remove = int(ntp_train - (target_ratio[1] / target_ratio[0]) * nfp_train)
+                X_train = X_train[:-to_remove]
+                y_train = y_train[:-to_remove]
+            train_label_ratios = np.sum(y_train, axis=0) / len(y_train)
 
         # Create a permutation of indices
         indices_train = np.random.permutation(len(X_train))
@@ -204,7 +265,7 @@ def main(args):
             print(f"Train Label Ratios (0: fp, 1: tp): {train_label_ratios}")
             print(f"Validation Label Ratios (0: fp, 1: tp): {val_label_ratios}")
 
-        model = training_api.build_convnet()
+        model = training_api.build_convnet(learning_rate=args.lr_classification)
         if args.verbose:
             model.summary()
 
@@ -212,11 +273,11 @@ def main(args):
             x=X_train,  # We need to apply the preprocessing thought for the ConvNeXt network, which is nothing
             y=y_train,
             # class_weight=class_weight_dict,
-            batch_size=32,
-            epochs=100,
+            batch_size=args.batch_classification,
+            epochs=args.epochs_classification,
             validation_data=(X_val, y_val),  # We need to apply the preprocessing thought for the ConvNeXt network
             callbacks=[
-                tfk.callbacks.EarlyStopping(monitor='val_accuracy', mode='max', patience=10, restore_best_weights=True)]
+                tfk.callbacks.EarlyStopping(monitor='val_accuracy', mode='max', patience=args.patience_classification, restore_best_weights=True)]
         ).history
 
         # Plot the transfer learning and the fine-tuned ConvNeXt training histories
@@ -235,11 +296,12 @@ def main(args):
         plt.title('Accuracy')
         plt.grid(alpha=.3)
 
-        plt.show()
+        #plt.show()
 
         model.save("output.keras")
 
-if __name__ == "__main__":
+
+def parse_args():
     parser = argparse.ArgumentParser(description="python training_pipeline.py --dataset my_dataset")
 
     # Add command-line arguments
@@ -258,9 +320,15 @@ if __name__ == "__main__":
     parser.add_argument(
         "--fine_tuning_steps",
         type=int,
-        default=5,
+        default=3,
         help="Number of fine-tuning runs, with a constant rate of layer "
-             "unfreezing down to 0 frozen layers (default: 5)"
+             "unfreezing down to 0 frozen layers (default: 3)"
+    )
+    parser.add_argument(
+        "--lr_classification",
+        type=float,
+        default=0.001,
+        help="Learning rate for classification (default: 0.001)"
     )
     parser.add_argument(
         "--lr0",
@@ -273,6 +341,12 @@ if __name__ == "__main__":
         type=float,
         default=-1,
         help="Final run learning rate (default: lr0/100)"
+    )
+    parser.add_argument(
+        "--batch_classification",
+        type=int,
+        default=32,
+        help="Batch size for classification (default: 32)"
     )
     parser.add_argument(
         "--batch_init",
@@ -300,10 +374,38 @@ if __name__ == "__main__":
         help="Maximal number of epochs per run (default: 20)"
     )
     parser.add_argument(
+        "--epochs_classification",
+        type=int,
+        default=10,
+        help="Number of epochs for classification (default: 10)"
+    )
+    parser.add_argument(
         "--patience",
         type=int,
         default=5,
         help="Patience fo early stopping (default: 5)"
+    )
+    parser.add_argument(
+        "--patience_classification",
+        type=int,
+        default=5,
+        help="Patience fo early stopping for the classifier (default: 5)"
+    )
+    parser.add_argument(
+        "--tp_ratio",
+        type=float,
+        default=0.5,
+        help="Ratio of true positives wished in training set for classification "
+             "(default: balanced dataset with ratio 0.5, but you may try "
+             "values between [0-1] if model does not converge, or -1 if you don't want undersampling)"
+    )
+    parser.add_argument(
+        "--max_nb_images",
+        type=int,
+        default=5000,
+        help="Maximum size for the training set of the classifier (default: 5000). Usually the default is enough "
+             "to train a strong classifier, but depending on your hardware you could change it or set it to -1 "
+             "if you don't want any undersampling"
     )
     parser.add_argument(
         "--model",
@@ -332,6 +434,30 @@ if __name__ == "__main__":
         action="store_true",
         help="Disables detector training, only trains corrector"
     )
+    parser.add_argument(
+        "--no_split",
+        action="store_true",
+        help="In case the input folder is already split for validation "
+             "and in yolo yaml format, this prevents further splitting"
+    )
+    parser.add_argument(
+        "--replace_all",
+        action="store_true",
+        help="When set to True, script does not ask user to delete the previous output files, "
+             "it deletes them by default (make sure you don't need those or have made a copy of "
+             "them before specifying this flag)"
+    )
+    parser.add_argument(
+        "--heatmap_extractor",
+        type=str,
+        default=None,
+        help="Preprocess all input images with the feature extractor given as parameter, "
+             "in order to train a high-precision and low-recall model (default: no preprocessing)"
+    )
+
+    return parser.parse_args()
+
+if __name__ == "__main__":
     # Parse arguments and run the main function
-    args = parser.parse_args()
+    args = parse_args()
     main(args)

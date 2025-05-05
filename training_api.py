@@ -1,10 +1,17 @@
 import os
+import random
+
 import cv2
 import numpy as np
 from PIL import Image
 from matplotlib import pyplot as plt
 from tensorflow import keras as tfk
 from tensorflow.keras import layers as tfkl
+import tensorflow as tf
+from sklearn.metrics import pairwise_distances
+from tensorflow.keras.applications import EfficientNetB0
+from tensorflow.keras.applications.efficientnet import preprocess_input
+from tensorflow.keras.models import Model
 
 import api
 
@@ -63,7 +70,7 @@ def make_image_and_label_array(dir):
 
     return x, y
 
-def build_convnet(input_shape=(256,256,3)):
+def build_convnet(input_shape=(256,256,3), learning_rate=0.001):
     convnet = tfk.applications.EfficientNetB0(
         input_shape=(256, 256, 3),
         include_top=False,
@@ -96,7 +103,8 @@ def build_convnet(input_shape=(256,256,3)):
     model = tfk.Model(inputs=inputs, outputs=outputs, name='conv_model')
 
     # Compile the model with Binary Cross-Entropy loss and AdamW optimizer
-    model.compile(loss=tfk.losses.BinaryCrossentropy(), optimizer="adam", metrics=['accuracy'])
+    optimizer = tfk.optimizers.Adam(learning_rate=learning_rate)
+    model.compile(loss=tfk.losses.BinaryCrossentropy(), optimizer=optimizer, metrics=['accuracy'])
 
     return model
 
@@ -129,3 +137,131 @@ def plot_images(images, titles=None, max_cols=5, figsize=(12, 6)):
 
     plt.tight_layout()
     plt.show()
+
+def extract_heatmap(img_array, heatmap, alpha=0.1):
+
+    heatmap  = tf.image.resize(heatmap, (img_array.shape[0], img_array.shape[1]), method=tf.image.ResizeMethod.BILINEAR)
+    heatmap = np.uint8(heatmap * 255)  # Scale to [0,255]
+    heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)  # Apply color map
+    heatmap_RGB = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
+    superimposed_img_BGR = cv2.addWeighted(np.uint8(img_array), 1 - alpha, heatmap_RGB, alpha, 0)  # Blend images
+    superimposed_img = cv2.cvtColor(superimposed_img_BGR, cv2.COLOR_BGR2RGB)
+
+    return superimposed_img
+
+
+seed=69
+def make_average_detection(image_path, label_path, seed=seed, n_avg=5):
+    np.random.seed(seed)
+    random.seed(seed)
+
+    image = cv2.imread(image_path)
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+    gt_file = label_path
+    gt_list = api.txt_to_tuple_list(gt_file)
+    if len(gt_list) > 0 and len(gt_list[0]) == 4:
+        gt_list = [x + (1,) for x in gt_list]
+    gt_list = [api.yolo_to_bbox(x, image.shape[1], image.shape[0]) for x in gt_list]
+    random.shuffle(gt_list)
+    gt_list = sorted(gt_list, key=lambda x: x[4], reverse=True)
+    gt_list = gt_list[:n_avg] if len(gt_list) > n_avg else gt_list
+
+    resized_pred_regions = []
+    for region in gt_list:
+        x_min, y_min, x_max, y_max, _ = map(int, region)
+        cropped_region = image[y_min:y_max, x_min:x_max].astype(np.uint8)
+        cropped_region = tf.image.resize(cropped_region, (256, 256), method=tf.image.ResizeMethod.BILINEAR)
+        resized_pred_regions.append(cropped_region)
+    resized_pred_regions = np.asarray(resized_pred_regions, dtype=np.uint8)
+    return np.mean(resized_pred_regions, axis=0)
+
+
+def select_diverse_images(images, n, seed=seed, original_features=None):
+    """
+    Select n most diverse images from a numpy array using greedy max-min pixel-level distance.
+
+    Parameters:
+        images (np.ndarray): Array of shape (N, H, W[, C])
+        n (int): Number of diverse images to select
+
+    Returns:
+        diverse_images (np.ndarray): Subset of selected images
+        selected_indices (list): Indices of selected images
+    """
+    np.random.seed(seed)
+    random.seed(seed)
+
+    # Flatten images to vectors
+    N = len(images)
+    flat_images = images.reshape(N, -1)
+
+    # Start with a random image
+    selected_indices = [np.random.randint(N)]
+    selected_features = flat_images[selected_indices]
+
+    for _ in range(n - 1):
+        remaining_indices = list(set(range(N)) - set(selected_indices))
+        remaining_features = flat_images[remaining_indices]
+
+        # Compute distances to the selected set
+        to_diverge_from = np.append(original_features, selected_features, axis=0) \
+            if original_features is not None else selected_features
+        dists = pairwise_distances(remaining_features, to_diverge_from)
+        min_dists = dists.min(axis=1)
+
+        # Pick the image with the largest minimum distance
+        next_idx = remaining_indices[np.argmax(min_dists)]
+        selected_indices.append(next_idx)
+        selected_features = flat_images[selected_indices]
+
+    diverse_images = images[selected_indices]
+    return diverse_images, selected_indices
+
+
+def extract_features(images, batch_size=32):
+    """
+    Extract features from images using EfficientNetB0 in TensorFlow.
+
+    Args:
+        images (np.ndarray): (N, H, W, C), dtype uint8 or float32
+        batch_size (int): Batch size for inference
+
+    Returns:
+        features (np.ndarray): (N, D) feature vectors
+    """
+    base_model = EfficientNetB0(weights='imagenet', include_top=False, pooling='avg')
+    model = Model(inputs=base_model.input, outputs=base_model.output)
+
+    # Ensure input is float32 and scaled to [0, 255]
+    if images.dtype != np.float32:
+        images = images.astype(np.float32)
+
+    features = []
+    num_batches = int(np.ceil(len(images) / batch_size))
+
+    for i in range(num_batches):
+        batch = images[i * batch_size : (i + 1) * batch_size]
+        # Resize to 224x224 and preprocess
+        batch_resized = tf.image.resize(batch, (224, 224))
+        batch_preprocessed = preprocess_input(batch_resized)
+        batch_features = model(batch_preprocessed, training=False).numpy()
+        features.append(batch_features)
+
+    return np.concatenate(features, axis=0)
+
+
+def make_representative_split(images_dir, labels_dir, test_size, seed=seed, original_features=None):
+
+    images, labels = api.get_images_and_labels(images_dir, labels_dir)
+    images.sort()
+    labels.sort()
+
+    avg_detections = [make_average_detection(os.path.join(images_dir, images[i]),
+                                             os.path.join(labels_dir, labels[i]), seed=seed)
+                      for i in range(len(images))]
+    avg_detections = np.asarray(avg_detections)
+
+    features = extract_features(avg_detections)
+    _, indices = select_diverse_images(features, test_size, seed=seed, original_features=original_features)
+    return indices
