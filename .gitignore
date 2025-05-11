@@ -2,6 +2,7 @@
 MiniSample
 output
 guiout
+toy_dataset
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
