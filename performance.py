@@ -10,6 +10,7 @@ def main(args):
     precisions = np.zeros(nb_images)
     recalls = np.zeros(nb_images)
     f1_scores = np.zeros(nb_images)
+    map_customs = np.zeros(nb_images)
     map50s = np.zeros(nb_images)
     map50_95s = np.zeros(nb_images)
 
@@ -45,12 +46,15 @@ def main(args):
             print("precision :", metrics["precision"])
             print("recall :", metrics["recall"])
             print("f1_score :", metrics["f1_score"])
+            print("map@custom :", api.compute_map_50(pred_list, gt_list, label_bias=True))
             print("map@50 :", api.compute_map_50(pred_list, gt_list))
             print("map@50_95 :", api.compute_map_50_95(pred_list, gt_list))
+            print()
 
         precisions[idx] = metrics["precision"]
         recalls[idx] = metrics["recall"]
         f1_scores[idx] = metrics["f1_score"]
+        map_customs[idx] = api.compute_map_50(pred_list, gt_list, label_bias=True)
         map50s[idx] = api.compute_map_50(pred_list, gt_list)
         map50_95s[idx] = api.compute_map_50_95(pred_list, gt_list)
 
@@ -58,6 +62,7 @@ def main(args):
     print("precision :", np.mean(precisions))
     print("recall :", np.mean(recalls))
     print("f1_score :", np.mean(f1_scores))
+    print("map@custom :", np.mean(map_customs))
     print("map@50 :", np.mean(map50s))
     print("map@50_95 :", np.mean(map50_95s))
 

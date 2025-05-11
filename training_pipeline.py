@@ -160,36 +160,38 @@ def main(args):
     if not args.detection_only:
         api.warn_user_if_file_exists("output.keras", silent=args.replace_all)
 
-        # original_argv = list(sys.argv)
-        # inference_args = f"inference_pipeline.py --input_folder {os.path.join(args.dataset, 'train', 'images')} " \
-        #                  f"--model {best_model} --conf 0.25 --img_size {args.img_size} " \
-        #                  f"--detection_only --write_conf --silent".split()
-        # sys.argv = list(inference_args)
-        # if args.verbose:
-        #     print("Inferring on training dataset, may take a few seconds...")
-        # inference_args = inference_pipeline.parse_args()
-        # inference_pipeline.main(inference_args)
-        #
-        # api.warn_user_if_directory_exists("classify", silent=args.replace_all)
-        # os.makedirs(os.path.join("classify", "train"))
-        # if args.verbose:
-        #     print("Storing true and false positives for posterior classification training...")
-        # training_api.save_tps_and_fps(os.path.join(args.dataset, 'train', 'images'), "output",
-        #                               os.path.join(args.dataset, 'train', 'labels'), os.path.join("classify", "train"))
-        #
-        # inference_args = f"inference_pipeline.py --input_folder {os.path.join(args.dataset, 'val', 'images')} " \
-        #                  f"--model {best_model} --conf 0.25 --img_size {args.img_size} " \
-        #                  f"--detection_only --write_conf --silent".split()
-        # sys.argv = list(inference_args)
-        # if args.verbose:
-        #     print("Inferring on validation dataset, may take a few seconds...")
-        # inference_args = inference_pipeline.parse_args()
-        # inference_pipeline.main(inference_args)
-        #
-        # if args.verbose:
-        #     print("Storing true and false positives for posterior classification validation...")
-        # training_api.save_tps_and_fps(os.path.join(args.dataset, 'val', 'images'), "output",
-        #                               os.path.join(args.dataset, 'val', 'labels'), os.path.join("classify", "val"))
+        original_argv = list(sys.argv)
+        inference_args = f"inference_pipeline.py --input_folder {os.path.join(args.dataset, 'train', 'images')} " \
+                         f"--model {best_model} --conf 0.01 --img_size {args.img_size} " \
+                         f"--detection_only --write_conf --silent".split()
+        sys.argv = list(inference_args)
+        if args.verbose:
+            print("Inferring on training dataset, may take a few seconds...")
+        inference_args = inference_pipeline.parse_args()
+        inference_pipeline.main(inference_args)
+
+        api.warn_user_if_directory_exists("classify", silent=args.replace_all)
+        os.makedirs(os.path.join("classify", "train"))
+        if args.verbose:
+            print("Storing true and false positives for posterior classification training...")
+        training_api.save_tps_and_fps(os.path.join(args.dataset, 'train', 'images'), "output",
+                                      os.path.join(args.dataset, 'train', 'labels'), os.path.join("classify", "train"),
+                                      resize_mode=args.resize_mode)
+
+        inference_args = f"inference_pipeline.py --input_folder {os.path.join(args.dataset, 'val', 'images')} " \
+                         f"--model {best_model} --conf 0.01 --img_size {args.img_size} " \
+                         f"--detection_only --write_conf --silent".split()
+        sys.argv = list(inference_args)
+        if args.verbose:
+            print("Inferring on validation dataset, may take a few seconds...")
+        inference_args = inference_pipeline.parse_args()
+        inference_pipeline.main(inference_args)
+
+        if args.verbose:
+            print("Storing true and false positives for posterior classification validation...")
+        training_api.save_tps_and_fps(os.path.join(args.dataset, 'val', 'images'), "output",
+                                      os.path.join(args.dataset, 'val', 'labels'), os.path.join("classify", "val"),
+                                      resize_mode=args.resize_mode)
 
 
         if args.verbose:
@@ -277,7 +279,7 @@ def main(args):
             epochs=args.epochs_classification,
             validation_data=(X_val, y_val),  # We need to apply the preprocessing thought for the ConvNeXt network
             callbacks=[
-                tfk.callbacks.EarlyStopping(monitor='val_accuracy', mode='max', patience=args.patience_classification, restore_best_weights=True)]
+                tfk.callbacks.EarlyStopping(monitor='val_loss', mode='min', patience=args.patience_classification, restore_best_weights=True)]
         ).history
 
         # Plot the transfer learning and the fine-tuned ConvNeXt training histories
@@ -394,9 +396,9 @@ def parse_args():
     parser.add_argument(
         "--tp_ratio",
         type=float,
-        default=0.5,
+        default=0.8,
         help="Ratio of true positives wished in training set for classification "
-             "(default: balanced dataset with ratio 0.5, but you may try "
+             "(default:0.8 for good true positive representation, but you may try "
              "values between [0-1] if model does not converge, or -1 if you don't want undersampling)"
     )
     parser.add_argument(
@@ -453,6 +455,13 @@ def parse_args():
         default=None,
         help="Preprocess all input images with the feature extractor given as parameter, "
              "in order to train a high-precision and low-recall model (default: no preprocessing)"
+    )
+    parser.add_argument(
+        "--resize_mode",
+        type=str,
+        default="pad",
+        help="Mode of resizing of the bounding box for classification training. (default: \'pad\', "
+             "mode \'bilinear\' will allow faster inference time at the cost of lower classification accuracy)"
     )
 
     return parser.parse_args()

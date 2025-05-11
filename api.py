@@ -3,15 +3,25 @@ import shutil
 
 import cv2
 import tensorflow as tf
+from matplotlib import pyplot as plt
 from tensorflow import keras as tfk
 from tensorflow.keras import layers as tfkl
 import numpy as np
-from PIL import Image
+import random
+import yaml
+
+seed = 69
+
 
 def store_predictions(results):
     """
-    Extracts predictions from YOLO model results and returns a list of tuples:
-    (x_center, y_center, width, height, confidence), all normalized.
+    Extracts normalized YOLO predictions from model results.
+
+    Args:
+        results: List of YOLO result objects, each with .boxes containing predicted bounding boxes.
+
+    Returns:
+        List of tuples (x_center, y_center, width, height, confidence), all normalized between 0 and 1.
     """
     predictions = []
 
@@ -24,8 +34,21 @@ def store_predictions(results):
 
     return predictions
 
+
 def yolo_to_bbox(yolo_bbox, img_width, img_height):
-    """ Convert YOLO format (x_center, y_center, width, height) to (x_min, y_min, x_max, y_max). """
+    """
+    Converts a bounding box from YOLO format ([+ confidence])
+    to absolute-coordinate (x_min, y_min, x_max, y_max, confidence) format.
+
+    Args:
+        yolo_bbox: Tuple of normalized (x_center, y_center, width, height, [confidence]).
+        img_width: Width of the image.
+        img_height: Height of the image.
+
+    Returns:
+        Bounding box as absolut-coordinate [x_min, y_min, x_max, y_max, confidence], which is the custom format.
+        If input yolo_bbox does not have field confidence, it will be set to 1.
+    """
 
     if len(yolo_bbox) == 4:
         yolo_bbox = yolo_bbox + (1,)
@@ -36,14 +59,18 @@ def yolo_to_bbox(yolo_bbox, img_width, img_height):
     y_max = (y_center + height / 2) * img_height
     return [x_min, y_min, x_max, y_max, conf]
 
-def reverse_axis(box, img_width, img_height):
-
-    x1, y1, x2, y2, conf = box
-    return img_width - x2, img_height - y2, img_width - x1, img_height - y1, conf
-
 
 def compute_iou(box1, box2):
-    """ Compute Intersection over Union (IoU) between two bounding boxes. """
+    """
+    Calculates the Intersection over Union (IoU) between two bounding boxes.
+
+    Args:
+        box1: First bounding box.
+        box2: Second bounding box.
+
+    Returns:
+        IoU value (float).
+    """
     x1, y1, x2, y2, _ = box1
     x1g, y1g, x2g, y2g, _ = box2
 
@@ -59,40 +86,21 @@ def compute_iou(box1, box2):
     union_area = box1_area + box2_area - inter_area
     return inter_area / union_area if union_area > 0 else 0
 
-def is_inside(box1, box2):
-    if box1 is None or box2 is None:
-        return False
-
-    x1, y1, x2, y2, _ = box1
-    x1g, y1g, x2g, y2g, _ = box2
-
-    ret = True
-    ret &= (x1 > x1g and x2 < x2g)
-    ret &= (y1 > y1g and y2 < y2g)
-
-    return ret
-
-def is_inside_and_centered(box1, box2):
-    if not is_inside(box1, box2):
-        return False
-
-    x1, y1, x2, y2, conf = box2
-    width = x2 - x1
-    height = y2 - y1
-
-    shift_right = x1 + width/2, y1, x2 + width/2, y2, conf
-    shift_left = x1 - width/2, y1, x2 - width/2, y2, conf
-    shift_up = x1, y1 + height/2, x2, y2 + height/2, conf
-    shift_down = x1, y1 - height / 2, x2, y2 - height / 2, conf
-
-    ret = True
-    ret &= compute_iou(box1, shift_right) > 0
-    ret &= compute_iou(box1, shift_left) > 0
-    ret &= compute_iou(box1, shift_up) > 0
-    ret &= compute_iou(box1, shift_down) > 0
-    return ret
 
 def is_largely_contained(box1, box2, threshold=0.5):
+    """
+    Checks if box1 is largely contained within box2 by intersection area ratio,
+    or inversely if box2 is largely contained in box1.
+
+    Args:
+        box1: First bounding box.
+        box2: Second bounding box.
+        threshold: Intersection area ratio to be considered 'contained'.
+
+    Returns:
+        True if the containment ratio exceeds threshold,
+        in any of the two ways (box1-in-box2 or box2-in-box1)
+    """
 
     if box1 is None or box2 is None:
         return False
@@ -105,6 +113,8 @@ def is_largely_contained(box1, box2, threshold=0.5):
     xi2 = min(x2, x2g)
     yi2 = min(y2, y2g)
 
+    # when one of the boxes' area is close to the intersection's area,
+    # it means that this box is largely contained in the other one.
     inter_area = max(0, xi2 - xi1) * max(0, yi2 - yi1)
     box1_area = (x2 - x1) * (y2 - y1)
     box2_area = (x2g - x1g) * (y2g - y1g)
@@ -112,36 +122,62 @@ def is_largely_contained(box1, box2, threshold=0.5):
         return True
     return inter_area/box1_area > threshold or inter_area/box2_area > threshold
 
+
+# LABEL_BIAS allows containment as valid match, by default.
+# This is due to an initial bias in the labelling.
 LABEL_BIAS = True
-def evaluate_detections(pred_boxes, gt_boxes, iou_threshold=0.5, iosa_threshold=0.7):
-    """ Compute precision, recall, and IoU-based accuracy. """
+def evaluate_detections(pred_boxes, gt_boxes, iou_threshold=0.5, iosa_threshold=0.7, label_bias=LABEL_BIAS):
+    """
+    Evaluates detection performance by comparing predicted and ground truth boxes.
+
+    Args:
+        pred_boxes: List of predicted boxes with confidence (custom format).
+        gt_boxes: List of ground truth boxes (custom format).
+        iou_threshold: IoU threshold for matching.
+        iosa_threshold: Intersection over smallest area threshold.
+                        Additional containment threshold, only relevant if label_bias is true.
+        label_bias: If True, allows containment match as valid match.
+
+    Returns:
+        Tuple: (false_positive_list, metrics_dict),
+        with metrics containing entries precision, recall, f1_score and ap (average precision)
+    """
+    if len(pred_boxes) == 0 and len(gt_boxes) > 0:
+        return [], {"precision": 1, "recall": 0, "f1_score": 0, "ap": 0}
+    elif len(gt_boxes) == 0 and len(pred_boxes) > 0:
+        return list(pred_boxes), {"precision": 0, "recall": 1, "f1_score": 0, "ap": 0}
+
     tp, fp, fn = 0, 0, 0
-    matched_preds = set()
+    matched_gt = set()
 
     pred_boxes = sorted(pred_boxes, key=lambda x: x[4], reverse=True)
     tps = []
     fps = []
 
-    for gt in gt_boxes:
+    for pred in pred_boxes:
         best_iou = 0
         best_match = None
         best_box = None
-        for i, pred in enumerate(pred_boxes):
+        for i, gt in enumerate(gt_boxes):
             iou = compute_iou(pred, gt)
             if iou > best_iou:
                 best_iou = iou
                 best_match = i
-                best_box = pred
+                best_box = gt
 
-        bias_condition = LABEL_BIAS and is_largely_contained(best_box, gt, iosa_threshold)
-        if (best_iou >= iou_threshold or bias_condition) and best_match not in matched_preds:
+        bias_condition = label_bias and is_largely_contained(best_box, pred, iosa_threshold)
+        if (best_iou >= iou_threshold or bias_condition) and best_match not in matched_gt:
             tp += 1
-            matched_preds.add(best_match)
+            matched_gt.add(best_match)
             tps.append(1)
             fps.append(0)
         else:
+            fp += 1
             tps.append(0)
             fps.append(1)
+
+    fp_list = [pred_boxes[i] for i in range(len(pred_boxes)) if fps[i] == 1]
+    fn = len(gt_boxes) - len(matched_gt)
 
     tps = np.cumsum(tps)
     fps = np.cumsum(fps)
@@ -149,16 +185,12 @@ def evaluate_detections(pred_boxes, gt_boxes, iou_threshold=0.5, iosa_threshold=
     recalls = tps / len(gt_boxes)
     precisions = tps / (tps + fps + 1e-6)
 
-    # Interpolate precision (COCO-style 101-point interpolation optional)
+    # Interpolate precision (COCO-style 101-point interpolation)
     ap = 0.0
     for t in np.linspace(0, 1, 101):
         p = precisions[recalls >= t]
         ap += max(p) if p.size else 0
     ap /= 101
-
-    fp_list = [pred_boxes[i] for i in range(len(pred_boxes)) if i not in matched_preds]
-    fp = len(fp_list)
-    fn = len(gt_boxes) - len(matched_preds)
 
     precision = tp / (tp + fp) if (tp + fp) > 0 else 1
     recall = tp / (tp + fn) if (tp + fn) > 0 else 1
@@ -166,20 +198,53 @@ def evaluate_detections(pred_boxes, gt_boxes, iou_threshold=0.5, iosa_threshold=
 
     return fp_list, {"precision": precision, "recall": recall, "f1_score": f1_score, "ap": ap}
 
+
 def compute_map_50_95(pred_list, gt_list):
+    """
+    Computes mean average precision over IoU thresholds from 0.5 to 0.95.
+
+    Args:
+        pred_list: List of predicted boxes (custom format).
+        gt_list: List of ground truth boxes (custom format).
+
+    Returns:
+        Mean Average Precision (float).
+    """
     aps = []
     for iou in np.arange(0.5, 1.0, 0.05):
-        _, metrics = evaluate_detections(pred_list, gt_list, iou_threshold=iou)
+        _, metrics = evaluate_detections(pred_list, gt_list, iou_threshold=iou, label_bias=False)
         ap = metrics["ap"]
         aps.append(ap)
     return np.mean(aps)
 
-def compute_map_50(pred_list, gt_list):
-    _, metrics = evaluate_detections(pred_list, gt_list, iou_threshold=0.5)
+
+def compute_map_50(pred_list, gt_list, label_bias=False):
+    """
+    Computes average precision at 0.5 IoU threshold.
+
+    Args:
+        pred_list: List of predicted boxes (custom format).
+        gt_list: List of ground truth boxes (format).
+        label_bias: Whether to allow relaxed matching.
+
+    Returns:
+        Average Precision at IoU=0.5.
+    """
+    _, metrics = evaluate_detections(pred_list, gt_list, iou_threshold=0.5, label_bias=label_bias)
     ap = metrics["ap"]
     return np.mean(ap)
 
+
 def txt_to_tuple_list(file_name):
+    """
+    Converts YOLO-style .txt annotation file into list of tuples.
+
+    Args:
+        file_name: Path to .txt file.
+
+    Returns:
+        List of tuples containing bounding box data.
+    """
     ret_list = []
     with open(file_name, mode='r', newline='') as file:
         for line in file.readlines():
@@ -188,8 +253,18 @@ def txt_to_tuple_list(file_name):
                 ret_list.append(tuple([float(x) for x in row[1:]]))
     return ret_list
 
+
 def draw_bboxes(image, bboxes, color=(0, 255, 0), thickness=2, show_conf=False):
-    """ Draw bounding boxes on an image and display it. """
+    """
+    Draws bounding boxes on an image using OpenCV.
+
+    Args:
+        image: OpenCV image array.
+        bboxes: List of (x_min, y_min, x_max, y_max, conf).
+        color: Color for bounding boxes (RGB).
+        thickness: Line thickness.
+        show_conf: If True, draws confidence score.
+    """
 
     for (x_min, y_min, x_max, y_max, conf) in bboxes:
         cv2.rectangle(image, (int(x_min), int(y_min)), (int(x_max), int(y_max)), color, thickness)
@@ -207,7 +282,7 @@ def draw_bboxes(image, bboxes, color=(0, 255, 0), thickness=2, show_conf=False):
             # Get the size of the text box
             (text_width, text_height), _ = cv2.getTextSize(label, font, font_scale, font_thickness)
 
-            # Draw background rectangle for text (optional, improves readability)
+            # Draw background rectangle for text
             cv2.rectangle(image,
                           (int(x_min), int(y_min) - text_height - 8),
                           (int(x_min) + text_width, int(y_min)),
@@ -220,27 +295,18 @@ def draw_bboxes(image, bboxes, color=(0, 255, 0), thickness=2, show_conf=False):
                         font, font_scale,
                         (0, 0, 0), font_thickness, lineType=cv2.LINE_AA)
 
-def resize_image_opencv(image_path, output_size=(2016, 1216)):
-    """ Resize an image to the given dimensions using OpenCV. """
-    image = cv2.imread(image_path)  # Load image
-    resized_image = cv2.resize(image, output_size, interpolation=cv2.INTER_LINEAR)
-    return resized_image
-
-# def remove_overlapping_regions(bboxes, overlap_treshold=0.5):
-#     ret_list = []
-#     bboxes = sorted(bboxes, key=lambda x: x[4])
-#     for i in range(len(bboxes)):
-#         overlap_found = False
-#         for j in range(i+1, len(bboxes)):
-#             if is_largely_contained(bboxes[i], bboxes[j], threshold=overlap_treshold):
-#             #if compute_iou(bboxes[i], bboxes[j]) > 0: #or is_largely_contained(bboxes[i], bboxes[j]):
-#                 overlap_found = True
-#                 break
-#         if not overlap_found:
-#             ret_list.append(bboxes[i])
-#     return ret_list
 
 def remove_overlapping_regions(bboxes, overlap_treshold=0.5):
+    """
+    Removes overlapping bounding boxes based on containment logic.
+
+    Args:
+        bboxes: List of bounding boxes (custom format).
+        overlap_treshold: Containment (iosa) threshold.
+
+    Returns:
+        Filtered list of bounding boxes.
+    """
     bboxes = sorted(bboxes, key=lambda x: x[4], reverse=True)
     to_remove = np.zeros(len(bboxes))
     for i in range(len(bboxes)):
@@ -251,7 +317,18 @@ def remove_overlapping_regions(bboxes, overlap_treshold=0.5):
     ret_list = [bboxes[i] for i in range(len(bboxes)) if to_remove[i] == 0]
     return ret_list
 
+
 def remove_overlapping_regions_wrt_iou(bboxes, overlap_treshold=0.5):
+    """
+    Removes overlapping bounding boxes based on IoU threshold.
+
+    Args:
+        bboxes: List of bounding boxes.
+        overlap_treshold: IoU threshold to determine overlap.
+
+    Returns:
+        Filtered list of bounding boxes.
+    """
     bboxes = sorted(bboxes, key=lambda x: x[4], reverse=True)
     to_remove = np.zeros(len(bboxes))
     for i in range(len(bboxes)):
@@ -262,8 +339,18 @@ def remove_overlapping_regions_wrt_iou(bboxes, overlap_treshold=0.5):
     ret_list = [bboxes[i] for i in range(len(bboxes)) if to_remove[i] == 0]
     return ret_list
 
+
 def filter_bboxes_zscore(bboxes, threshold=5):
-    """ Remove bounding boxes with extreme areas using Z-score. """
+    """
+    Filters out bounding boxes with anomalous areas using z-score.
+
+    Args:
+        bboxes: List of bounding boxes (custom format).
+        threshold: Z-score threshold.
+
+    Returns:
+        Filtered bounding boxes.
+    """
     areas = np.array([(x_max - x_min) * (y_max - y_min) for x_min, y_min, x_max, y_max, _ in bboxes])
 
     mean_area = np.mean(areas)
@@ -275,26 +362,55 @@ def filter_bboxes_zscore(bboxes, threshold=5):
 
     return filtered_bboxes
 
-def save_regions(image, boxes, output_path, output_length, resize=None):
 
+def save_regions(image, boxes, output_path, output_length, resize=None, resize_mode='bilinear'):
+    """
+    Saves cropped image regions based on bounding boxes.
+
+    Args:
+        image: Input numpy image array (RGB).
+        boxes: List of bounding boxes (custom format).
+        output_path: Directory to save cropped images.
+        output_length: Starting index for naming.
+        resize: Resize dimensions (height, width) if needed.
+        resize_mode: 'bilinear' or 'pad'.
+
+    Returns:
+        Updated output_length after saving.
+    """
+    nb_discarded = 0
     for i, region in enumerate(boxes):
         x_min, y_min, x_max, y_max, _ = map(int, region)
         cropped_region = image[y_min:y_max, x_min:x_max]
         if resize is not None:
-            cropped_region = tf.image.resize_with_pad(cropped_region, resize[0], resize[1])
+            if resize_mode == 'bilinear':
+                cropped_region = tf.image.resize(cropped_region, resize, method='bilinear')
+            elif resize_mode == 'pad':
+                try:
+                    cropped_region = tf.image.resize_with_pad(cropped_region, resize[0], resize[1])
+                except tf.errors.InvalidArgumentError:
+                    nb_discarded += 1
+                    continue
+            else:
+                raise ValueError("Invalid resizing mode")
             cropped_region = np.asarray(cropped_region, dtype=np.uint8)
-        cv2.imwrite(output_path + "/i" + str(output_length + i) + ".jpg", cropped_region)
-    return output_length + len(boxes)
+        cv2.imwrite(os.path.join(output_path, "i" + str(output_length + i - nb_discarded) + ".jpg"), cropped_region)
+    return output_length + len(boxes) - nb_discarded
+
 
 def save_yolo_format(bboxes, image_size, output_txt_path, class_id=0, write_conf=False):
     """
-    Saves bounding boxes in YOLO format to a .txt file.
+    Converting custom-format bounding boxes to YOLO-format and saving them to a file.
 
-    Parameters:
-        bboxes: list of tuples (x_min, y_min, x_max, y_max, conf)
-        image_path: path to the original image (for dimensions)
-        output_txt_path: path to the .txt file to write
-        class_id: default class id to assign to all boxes
+    Args:
+        bboxes: List of boxes (x_min, y_min, x_max, y_max, conf) (custom-format).
+        image_size: Tuple (width, height).
+        output_txt_path: File path for output.
+        class_id: Class ID for all boxes. (this method only saves single-class predictions)
+        write_conf: If True, includes confidence value.
+
+    Returns:
+        None
     """
 
     # Get image dimensions
@@ -323,33 +439,18 @@ def save_yolo_format(bboxes, image_size, output_txt_path, class_id=0, write_conf
             f.write(line_to_write + "\n")
 
 
-import numpy as np
+def warn_user_if_directory_exists(dir, silent=False, make_dir=True):
+    """
+    Warns user before deleting an existing directory, then recreates it.
 
+    Args:
+        dir: Path to directory.
+        silent: If True, does not prompt the user.
+        make_dir: If True, creates the directory after deletion.
 
-def get_bbox_class_probs(pred_list, saliency_map, threshold=0.5):
-    class_probs = []
-
-    for (x_min, y_min, x_max, y_max, conf) in pred_list:
-        # Convert to int in case coordinates are floats
-        x_min, y_min, x_max, y_max = map(int, [x_min, y_min, x_max, y_max])
-
-        # Clip to image boundaries
-        x_min = max(0, x_min)
-        y_min = max(0, y_min)
-        x_max = min(saliency_map.shape[1], x_max)
-        y_max = min(saliency_map.shape[0], y_max)
-
-        # Crop saliency region
-        region = saliency_map[y_min:y_max, x_min:x_max]
-
-        avg_saliency = np.mean(region)
-        label = 1 if avg_saliency >= threshold else 0
-        class_probs.append(label)
-
-    return class_probs
-
-
-def warn_user_if_directory_exists(dir, silent=False):
+    Returns:
+        None
+    """
     if os.path.exists(dir):
         if not silent:
             ans = input(f"{dir} folder already exists, do you wish to replace (r) or cancel (c) ?\n")
@@ -361,9 +462,21 @@ def warn_user_if_directory_exists(dir, silent=False):
                 shutil.rmtree(dir)
         else:
             shutil.rmtree(dir)
-    os.makedirs(dir)
+    if make_dir:
+        os.makedirs(dir)
+
 
 def warn_user_if_file_exists(file, silent=False):
+    """
+    Warns user before overwriting an existing file.
+
+    Args:
+        file: File path.
+        silent: If True, deletes without prompting.
+
+    Returns:
+        None
+    """
     if os.path.exists(file):
         if not silent:
             ans = input(f"{file} file already exists, do you wish to replace (r) or cancel (c) ?\n")
@@ -376,8 +489,14 @@ def warn_user_if_file_exists(file, silent=False):
         else:
             os.remove(file)
 
-def build_fcnn():
 
+def build_fcnn():
+    """
+    Builds a fully convolutional neural network using EfficientNetB0 as backbone.
+
+    Returns:
+        Keras model object (FCNN).
+    """
     convnet = tfk.applications.EfficientNetB0(
         include_top=False,
         weights="imagenet"
@@ -400,12 +519,31 @@ def build_fcnn():
 
 
 def transfer_dense_to_conv(dense_layer, conv_layer):
+    """
+    Transfers weights from a dense layer to a convolutional layer.
 
+    Args:
+        dense_layer: Keras Dense layer.
+        conv_layer: Keras Conv2D layer.
+
+    Returns:
+        None
+    """
     dense_weights, dense_bias = dense_layer.get_weights()
     conv_weights = np.expand_dims(np.expand_dims(dense_weights, axis=0), axis=0)  # Reshape for Conv2D
     conv_layer.set_weights([conv_weights, dense_bias])
 
+
 def make_fcnn(classifier):
+    """
+    Loads a dense classifier and converts it to a FCNN.
+
+    Args:
+        classifier: Path to trained classifier model.
+
+    Returns:
+        Keras FCNN model.
+    """
     fcnn = build_fcnn()
     extractor = tfk.models.load_model(classifier)
     for layer_fcnn, layer_orig in zip(fcnn.layers[1].layers, extractor.layers[1].layers):
@@ -417,14 +555,37 @@ def make_fcnn(classifier):
 
     return fcnn
 
+
 def has_corresponding_image(image_folder, label):
+    """
+    Checks whether an image file corresponding to a label exists in a folder.
+
+    Args:
+        image_folder: Directory containing images.
+        label: Filename of label (e.g., .txt or annotation).
+
+    Returns:
+        True if image exists, else False.
+    """
     for i in os.listdir(image_folder):
         if i.startswith(label[:-4]):
             return True
     return False
 
+
 def get_images_and_labels(image_folder, label_folder):
-    # Get all image files that have matching label files
+    """
+    Retrieves image files from a specified directory and their corresponding label files from another directory.
+
+    Args:
+        image_folder (str): Path to the directory containing image files.
+        label_folder (str): Path to the directory containing label files.
+
+    Returns:
+        tuple: A tuple containing two sorted and one-to-one matching lists:
+            - A list of image file names that have corresponding labels.
+            - A list of label file names with a matching image.
+    """
     image_extensions = (".jpg", ".jpeg", ".png")
     image_files = [
         f for f in os.listdir(image_folder)
@@ -434,24 +595,254 @@ def get_images_and_labels(image_folder, label_folder):
     label_files = [f for f in os.listdir(label_folder)
                    if f.endswith(".txt") and
                    has_corresponding_image(image_folder, f)]
+    image_files.sort()
+    label_files.sort()
 
     return image_files, label_files
 
 
-def make_set_from_indices(name, images_dir, labels_dir, indices, silent=True):
+def get_images(image_folder):
+    """
+    Retrieves image files from a specified directory.
 
+    Args:
+        image_folder (str): Path to the directory containing image files.
+
+    Returns:
+        A list of image file names that have image extensions (jpg, jpeg, png)
+    """
+    image_extensions = (".jpg", ".jpeg", ".png")
+    image_files = [
+        f for f in os.listdir(image_folder)
+        if f.lower().endswith(image_extensions)
+    ]
+    image_files.sort()
+
+    return image_files
+
+
+def make_set_from_indices(name, images_dir, labels_dir, indices, silent=True):
+    """
+    Creates a new dataset by copying specific images and labels (those specified in a list of indices)
+    from the source directories to a new set of directories.
+
+    Args:
+        name (str): The name of the new dataset, used to create subdirectories.
+        images_dir (str): Path to the source directory containing image files.
+        labels_dir (str): Path to the source directory containing label files.
+        indices (list[int]): A list of indices indicating which images and labels to copy.
+        silent (bool): Whether or not to suppress warnings if the directory already exists.
+
+    Returns:
+        None
+    """
     warn_user_if_directory_exists(name, silent=silent)
     test_images = os.path.join(name, "images")
     test_labels = os.path.join(name, "labels")
     os.makedirs(test_images)
     os.makedirs(test_labels)
 
-    images, labels = get_images_and_labels(images_dir, labels_dir)
-    images.sort()
-    labels.sort()
+    images_with_labels, labels = get_images_and_labels(images_dir, labels_dir)
+    all_images = get_images(images_dir)
+    nb_discarded = 0
+
+    for i in range(len(all_images)):
+        if all_images[i] in images_with_labels:
+            if i in indices:
+                shutil.copy2(os.path.join(images_dir, all_images[i]),
+                             os.path.join(test_images, all_images[i]))
+                shutil.copy2(os.path.join(labels_dir, labels[i - nb_discarded]),
+                             os.path.join(test_labels, labels[i - nb_discarded]))
+        else:
+            nb_discarded += 1
+
+
+def make_selection_from_indices(name, images_dir, indices, silent=True):
+    """
+    Creates a new selection by copying specific images (those specified in a list of indices)
+    from the source directory to a new directory.
+
+    Args:
+        name (str): The name of the new dataset directory.
+        images_dir (str): Path to the source directory containing image files.
+        indices (list[int]): A list of indices indicating which images and labels to copy.
+        silent (bool): Whether or not to suppress warnings if the directory already exists.
+
+    Returns:
+        None
+    """
+    warn_user_if_directory_exists(name, silent=silent)
+    test_images = os.path.join(name, "images")
+    os.makedirs(test_images)
+
+    images = get_images(images_dir)
 
     for i in indices:
         shutil.copy2(os.path.join(images_dir, images[i]),
                      os.path.join(test_images, images[i]))
-        shutil.copy2(os.path.join(labels_dir, labels[i]),
-                     os.path.join(test_labels, labels[i]))
+
+
+def show_images(images_dir, images, indices=None, pred_dir=None):
+    """
+    Displays images from a directory and optionally overlays bounding boxes for predicted labels.
+
+    Args:
+        images_dir (str): Path to the directory containing image files.
+        images (list[str]): A list of image filenames to display.
+        indices (list[int], optional): A list of indices specifying which images to display. Defaults to None (all images).
+        pred_dir (str, optional): Path to a directory containing prediction files for each image.
+                                  Defaults to None (no bounding boxes will be drawn).
+
+    Returns:
+        None
+    """
+    if indices is None:
+        indices = list(range(len(images)))
+    for idx in indices:
+        i = images[idx]
+        image = cv2.imread(os.path.join(images_dir, i))
+        if pred_dir is not None:
+            pred_file = os.path.join(pred_dir, i[:-4] + ".txt")
+            pred_list = txt_to_tuple_list(pred_file) if os.path.exists(pred_file) else []
+            if len(pred_list) > 0 and len(pred_list[0]) == 4:
+                pred_list = [x + (1,) for x in pred_list]
+            pred_list = [yolo_to_bbox(x, image.shape[1], image.shape[0]) for x in pred_list]
+            draw_bboxes(image, pred_list, color=(255, 0, 0), thickness=5, show_conf=True)
+        cv2.imshow(i, image)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+
+
+def copy_folder(src_folder, dst_folder):
+    os.makedirs(dst_folder, exist_ok=True)
+    for filename in os.listdir(src_folder):
+        src_file = os.path.join(src_folder, filename)
+        dst_file = os.path.join(dst_folder, filename)
+        if os.path.isfile(src_file):
+            shutil.copy2(src_file, dst_file)
+
+
+def shuffle_data(images, labels, seed):
+    random.seed(seed)
+
+    shuffled_images = list(images)
+    shuffled_labels = list(labels)
+    shuffled_images.sort()
+    shuffled_labels.sort()
+    indices = list(range(len(shuffled_images)))
+    random.shuffle(indices)
+    shuffled_images = [shuffled_images[i] for i in indices]
+    shuffled_labels = [shuffled_labels[i] for i in indices]
+
+    return shuffled_images, shuffled_labels
+
+
+
+def update_yaml_paths(yaml_path, new_dataset):
+    # Load existing YAML
+    with open(yaml_path, 'r') as f:
+        data = yaml.safe_load(f)
+
+    # Update paths
+    abs_new_dataset = os.path.abspath(new_dataset)
+    data['train'] = os.path.join(abs_new_dataset, 'train', 'images')
+    data['val'] = os.path.join(abs_new_dataset, 'val', 'images')
+
+    # Define output YAML path
+    output_yaml_path = os.path.join(new_dataset, os.path.basename(yaml_path))
+
+    # Save the modified YAML
+    with open(output_yaml_path, 'w') as f:
+        yaml.dump(data, f, sort_keys=False)
+
+    print(f"Updated YAML saved to {output_yaml_path}")
+
+
+def merge_datasets(original_dataset_dir, new_dir, output_dir, new_split_ratio=0.8, seed=seed, replace_val=True):
+    random.seed(seed)
+
+    src_images = os.path.join(original_dataset_dir, "images")
+    src_labels = os.path.join(original_dataset_dir, "labels")
+    train_path_src_images = os.path.join(original_dataset_dir, "train", "images")
+    train_path_src_labels = os.path.join(original_dataset_dir, "train", "labels")
+    val_path_src_images = os.path.join(original_dataset_dir, "val", "images")
+    val_path_src_labels = os.path.join(original_dataset_dir, "val", "labels")
+    yaml_src = os.path.join(original_dataset_dir, "data.yaml")
+
+    dst_images = os.path.join(output_dir, "images")
+    dst_labels = os.path.join(output_dir, "labels")
+    train_path_dst_images = os.path.join(output_dir, "train", "images")
+    train_path_dst_labels = os.path.join(output_dir, "train", "labels")
+    val_path_dst_images = os.path.join(output_dir, "val", "images")
+    val_path_dst_labels = os.path.join(output_dir, "val", "labels")
+
+    new_images_dir = os.path.join(new_dir, "images")
+    new_labels_dir = os.path.join(new_dir, "labels")
+
+    copy_folder(src_images, dst_images)
+    copy_folder(src_labels, dst_labels)
+    copy_folder(new_images_dir, dst_images)
+    copy_folder(new_labels_dir, dst_labels)
+    copy_folder(train_path_src_images, train_path_dst_images)
+    copy_folder(train_path_src_labels, train_path_dst_labels)
+    os.makedirs(val_path_dst_images, exist_ok=True)
+    os.makedirs(val_path_dst_labels, exist_ok=True)
+    update_yaml_paths(yaml_src, output_dir)
+
+    train_length_src = len(os.listdir(train_path_src_images))
+    val_length_src = len(os.listdir(val_path_src_images))
+    S = train_length_src + val_length_src
+
+    new_images, new_labels = get_images_and_labels(new_images_dir, new_labels_dir)
+    k = len(new_labels)
+
+    new_val_size = int((1 - new_split_ratio) * (S + k))
+    k_val = new_val_size - val_length_src if not replace_val else new_val_size
+    k_val = min(k_val, k)
+
+    images_to_add, labels_to_add = shuffle_data(new_images, new_labels, seed)
+    current_val_images, current_val_labels = get_images_and_labels(val_path_src_images, val_path_src_labels)
+    current_val_images, current_val_labels = shuffle_data(current_val_images, current_val_labels, seed)
+
+    for i in range(k_val):
+        image_name = images_to_add[i]
+        label_name = labels_to_add[i]
+        shutil.copy2(os.path.join(new_images_dir, image_name),
+                     os.path.join(val_path_dst_images, image_name))
+        shutil.copy2(os.path.join(new_labels_dir, label_name),
+                     os.path.join(val_path_dst_labels, label_name))
+        if replace_val and i < len(current_val_images):
+            image_to_replace = current_val_images[i]
+            label_to_replace = current_val_labels[i]
+            shutil.copy2(os.path.join(val_path_src_images, image_to_replace),
+                         os.path.join(train_path_dst_images, image_to_replace))
+            shutil.copy2(os.path.join(val_path_src_labels, label_to_replace),
+                         os.path.join(train_path_dst_labels, label_to_replace))
+
+    if k > k_val:
+        for i in range(k_val, k):
+            image_name = images_to_add[i]
+            label_name = labels_to_add[i]
+            shutil.copy2(os.path.join(new_images_dir, image_name),
+                         os.path.join(train_path_dst_images, image_name))
+            shutil.copy2(os.path.join(new_labels_dir, label_name),
+                         os.path.join(train_path_dst_labels, label_name))
+
+    if replace_val:
+        if len(current_val_images) > k_val:
+            for i in range(k_val, len(current_val_images)):
+                image_name = current_val_images[i]
+                label_name = current_val_labels[i]
+                shutil.copy2(os.path.join(val_path_src_images, image_name),
+                             os.path.join(val_path_dst_images, image_name))
+                shutil.copy2(os.path.join(val_path_src_labels, label_name),
+                             os.path.join(val_path_dst_labels, label_name))
+    else:
+        copy_folder(val_path_src_images, val_path_dst_images)
+        copy_folder(val_path_src_labels, val_path_dst_labels)
+
+    return S, k
+
+
+def convert_valid_to_real_indices(indices, valid_images, all_images):
+    return [all_images.index(valid_images[i]) for i in indices]

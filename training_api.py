@@ -16,7 +16,7 @@ from tensorflow.keras.models import Model
 import api
 
 
-def save_tps_and_fps(images, predictions, ground_truth, output_dir):
+def save_tps_and_fps(images, predictions, ground_truth, output_dir, resize_mode='bilinear'):
     output_tp_length = 0
     output_fp_length = 0
     output_tp_folder = os.path.join(output_dir, "tps")
@@ -39,8 +39,10 @@ def save_tps_and_fps(images, predictions, ground_truth, output_dir):
         fp_list, metrics = api.evaluate_detections(pred_list, gt_list, 0.25)
         tp_list = [x for x in pred_list if x not in fp_list]
 
-        output_tp_length = api.save_regions(image, tp_list, output_tp_folder, output_tp_length, resize=(256, 256))
-        output_fp_length = api.save_regions(image, fp_list, output_fp_folder, output_fp_length, resize=(256, 256))
+        output_tp_length = api.save_regions(image, tp_list, output_tp_folder, output_tp_length,
+                                            resize=(256, 256), resize_mode=resize_mode)
+        output_fp_length = api.save_regions(image, fp_list, output_fp_folder, output_fp_length,
+                                            resize=(256, 256), resize_mode=resize_mode)
 
 
 def make_image_and_label_array(dir):
@@ -173,6 +175,8 @@ def make_average_detection(image_path, label_path, seed=seed, n_avg=5):
         cropped_region = image[y_min:y_max, x_min:x_max].astype(np.uint8)
         cropped_region = tf.image.resize(cropped_region, (256, 256), method=tf.image.ResizeMethod.BILINEAR)
         resized_pred_regions.append(cropped_region)
+    if len(resized_pred_regions) == 0:
+        return np.zeros((256, 256, 3), dtype=np.uint8) # black image
     resized_pred_regions = np.asarray(resized_pred_regions, dtype=np.uint8)
     return np.mean(resized_pred_regions, axis=0)
 
@@ -254,8 +258,6 @@ def extract_features(images, batch_size=32):
 def make_representative_split(images_dir, labels_dir, test_size, seed=seed, original_features=None):
 
     images, labels = api.get_images_and_labels(images_dir, labels_dir)
-    images.sort()
-    labels.sort()
 
     avg_detections = [make_average_detection(os.path.join(images_dir, images[i]),
                                              os.path.join(labels_dir, labels[i]), seed=seed)

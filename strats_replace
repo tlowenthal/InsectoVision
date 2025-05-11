@@ -1,0 +1,19 @@
+### dataset0
+
+detector-only
+Average performance metrics over all images :
+precision : 0.8708727996892546
+recall : 0.8775399884543769
+f1_score : 0.8393655839175005
+map@custom : 0.8605455027387692
+map@50 : 0.7567919085145609
+map@50_95 : 0.4592176280546891
+
+detector + corrector
+Average performance metrics over all images :
+precision : 0.9309153912348639
+recall : 0.8759510770277373
+f1_score : 0.8624548559962473
+map@custom : 0.8610549285645549
+map@50 : 0.7578237308408926
+map@50_95 : 0.45994697353484393

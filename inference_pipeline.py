@@ -14,8 +14,8 @@ from ultralytics import YOLO
 import api
 import tensorflow as tf
 from tensorflow import keras as tfk
-import preprocess
 import time
+import training_api
 
 def main(args):
     # Example usage of the parsed arguments
@@ -35,7 +35,7 @@ def main(args):
 
     for image_file in os.listdir(args.input_folder):
 
-        # if image_file != "example_image.jpg":
+        # if image_file != "Classified[]be-rbins-ent-belgian-microlepidoptera[]cosmopterigidae[]box-01[]a2.jpg":
         #     continue
 
         start = time.time()
@@ -66,7 +66,7 @@ def main(args):
         cv_image_rgb = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
         pred_list = []
         for model in to_be_ensembled:
-            results = model.predict(source=image, conf=0.001, imgsz=args.img_size, iou=args.max_overlap,
+            results = model.predict(source=image, conf=args.conf, imgsz=args.img_size, iou=args.max_overlap,
                                     max_det=1000, verbose=args.verbose)
             pred = api.store_predictions(results)
             pred = [api.yolo_to_bbox(x, image_size[0], image_size[1]) for x in pred]
@@ -77,22 +77,34 @@ def main(args):
         pred_list = api.remove_overlapping_regions(pred_list)
         old_list = list(pred_list)
 
-        if not args.detection_only:
+        if not args.detection_only and len(pred_list) > 0:
             classifier_name = args.classifier
             classifier = tfk.models.load_model(classifier_name)
-            #preprocess_func = preprocess.dic[classifier_name]
 
             resized_pred_regions = []
-            for region in pred_list:
-                x_min, y_min, x_max, y_max, _ = map(int, region)
-                cropped_region = cv_image_rgb[y_min:y_max, x_min:x_max].astype(np.float32)
-                cropped_region = tf.image.resize_with_pad(cropped_region, 256, 256)
-                # resized_region = process_image(cropped_region)
-                resized_pred_regions.append(cropped_region)
-            #resized_pred_regions = preprocess_func(resized_pred_regions)
-            resized_pred_regions = np.asarray(resized_pred_regions, dtype=np.float32)
-            #resized_pred_regions = tf.constant(resized_pred_regions, dtype=tf.float32)
-            #resized_pred_regions = tf.image.resize_with_pad(resized_pred_regions, 256, 256)
+            if args.resize_mode == "pad":
+                for region in pred_list:
+                    x_min, y_min, x_max, y_max, _ = map(int, region)
+                    cropped_region = cv_image_rgb[y_min:y_max, x_min:x_max].astype(np.float32)
+                    cropped_region = tf.image.resize_with_pad(cropped_region, 256, 256)
+                    resized_pred_regions.append(cropped_region)
+                resized_pred_regions = np.asarray(resized_pred_regions, dtype=np.float32)
+            elif args.resize_mode == "bilinear":
+                cv_image_rgb = cv_image_rgb.astype(np.float32)
+                normalized_pred_list = []
+                for region in pred_list:
+                    x_min, y_min, x_max, y_max, _ = region
+                    normalized_pred_list.append((y_min / image_size[1], x_min / image_size[0],
+                                                y_max / image_size[1], x_max / image_size[0]))
+                resized_pred_regions = tf.image.crop_and_resize(
+                    image=tf.expand_dims(cv_image_rgb, axis=0),  # [1, H, W, C]
+                    boxes=normalized_pred_list,  # [N, 4] in normalized coords [y1, x1, y2, x2]
+                    box_indices=tf.zeros(len(normalized_pred_list), dtype=tf.int32),  # image index for each box
+                    crop_size=(256, 256)
+                )
+            else:
+                raise ValueError("Invalid resizing mode")
+            # training_api.plot_images(resized_pred_regions.numpy(), [f"Pred {i}" for i in range(1, len(resized_pred_regions) + 1)])
             predictions = np.argmax(classifier.predict(resized_pred_regions, verbose=args.verbose), axis=-1) if len(
                 resized_pred_regions) > 0 else np.array([])
             # print(model.predict(resized_pred_regions, verbose=0).astype(np.float64))
@@ -122,7 +134,7 @@ def parse_args():
         "--conf",
         type=float,
         default=0.125,
-        help="Confidence threshold (default: 0.125)"
+        help="Confidence threshold (default: 0.001)"
     )
     parser.add_argument(
         "--max_overlap",
@@ -133,14 +145,22 @@ def parse_args():
     parser.add_argument(
         "--model",
         type=str,
-        default=os.path.join("model", "current_best.pt"),
-        help="Path to detection model (default: current_best.pt, in the model directory)"
+        default=os.path.join("model", "final_23.pt"),
+        help="Path to detection model (default: final_23.pt, in the model directory)"
     )
     parser.add_argument(
         "--classifier",
         type=str,
-        default="pretrained.keras",
-        help="Binary classification model for posterior correction. Must be a keras file"
+        default=os.path.join("model", "final_23.keras"),
+        help="Path to posterior classifier (default: final_23.keras, in the model directory)"
+    )
+    parser.add_argument(
+        "--resize_mode",
+        type=str,
+        default="pad",
+        help="Resizing mode that was used in the training of the classifier. If you can afford "
+             "a bit more overhead, training with mode \'pad\' will give greater accuracy. "
+             "(default: \'pad\', faster but less accurate alternative : \'bilinear\'.)"
     )
     parser.add_argument(
         "--img_size",

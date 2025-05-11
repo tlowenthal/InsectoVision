@@ -137,9 +137,9 @@ def train_yolo(freeze_layers, batch_size, lr0, model_path, dataset, gpu, patienc
         if map_50_attempts > map_50_completed:
             print(f"Previous attempt scored best map50 {map_50_attempts}")
             shutil.rmtree(run_path)
-            shutil.copy2(os.path.join(attempt_dir, best_attempt_dir), run_path)
+            shutil.copytree(os.path.join(attempt_dir, best_attempt_dir), run_path)
             attempt_id = int(best_attempt_dir[len_run_dir + 1:])
-            batch_size.append(batch_size + ((try_id - 1) * DECREMENT_BATCH) - (attempt_id * DECREMENT_BATCH))
+            batch_size_list.append(batch_size + ((try_id - 1) * DECREMENT_BATCH) - (attempt_id * DECREMENT_BATCH))
         else:
             print(f"This attempt scored best map50 {map_50_completed}")
             batch_size_list.append(batch_size)
@@ -227,7 +227,7 @@ def main(args):
     print("{:<5} {:<10} {:<8} {:<12}".format("Run", "Freeze", "Batch", "mAP50"))
     print("-" * 50)
     for run_id, freeze, batch, map50 in results:
-        print(f"{run_id:<5} {freeze:<10} {batch:<8} {map50:<12.4f}")
+        print(f"{run_id:<5} {round(freeze):<10} {batch:<8} {map50:<12.4f}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="python fine_tune_yolo.py --dataset my_dataset")
