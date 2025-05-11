@@ -1,5 +1,0 @@
-train: /Users/tobiaslowenthal/Documents/Memoire/github/InsectoVision/toy_dataset/train/images
-val: /Users/tobiaslowenthal/Documents/Memoire/github/InsectoVision/toy_dataset/val/images
-nc: 1
-names:
-- insect
