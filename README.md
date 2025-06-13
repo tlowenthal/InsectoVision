@@ -18,6 +18,10 @@ commented.
 ## Tools overview
 ### Box Annotation UI
 
+This script provides a graphical user interface that gives access to part of the functionality the inferece tools
+without the need to use a terminal. Images can be viewed, scanned using an existing model and hand annotated.
+From annotated images, a summary of specimens can be created as well as individual crops of each.
+
 ### Inference tool
 
 Given a folder of entomological boxes' images, this script runs our detector's inference on each of them and
@@ -62,6 +66,43 @@ Note that for more precise information, all scripts are runnable with the comman
 which will explain the usage of all arguments in more details.
 
 ### Box annotation UI
+
+In the "File" tab:
+ -"Select image folder": opens a file navigator and lets the user select the working directory, either one already
+                        worked on or one containing images. In the latter case, the folders "images" "labels" and 
+                        "raw_ai_output" will be created.
+ -"Create folder from URL list": lets the user select a .txt file with URLs containing images. Those images will be
+                                 downloaded and put into a folder like in the previous case.
+ -"Open selected images": loads the working directory's images and annotations (if any) to the visual interface.
+ -"Scan selected images": runs the inference pipeline on the working directory images and stores the results in
+                          "raw_ai_output".
+ -"Quick open" and "Quick open from URL": selects (from an image directory or URL list), loads and runs inference
+                                          (if "raw_ai_output" and "labels" do not contain a file for every image).
+ -"Summarize saved boxes": creates a "summary.csv" file that contains the type and amount of each class of insect
+                           in the saved boxes, as well as the total amount.
+ -"Crop specimens from current box": creates a "crops" directory and saves in it a croped image of each specimen
+                                    and paper tag with a bounding box.
+
+With an image open:
+ -Left click on a bounding box: selects the bounding box (shown in blue)
+ -Shift + left click on a bounding box: adds the bounding box to current selection 
+ -Hold left click and drag: selects multiple bounding boxes
+ -"Previous" and "Next": allow to browse the set of images
+ -"Good detection" and "Bad detection": mark the currently selected boxes as correct/incorrect detection
+ -"New box": adds a new specimen bounding box 
+ -"Combine boxes": combines together all selected bounding boxes
+ -"Add label": adds a label to the selected bounding boxes
+ -"Save": saves the current image's bounding boxes to the "labels" directory
+ -"Confidence threshold" slider: changes the confidence threshold. Bounding boxes with confidence above it are displayed
+                                 in green and those below it, in yellow
+
+In the "Edit" tab:
+ -"New specimen box": same as "New box" in interface
+ -"New tag box": adds a new bounding box meant for paper tags. It is saved separately and isn't used in training, detection
+                 or selection
+ -"Combine selected boxes": same as "Combine boxes" in interface
+ -"Add label": same as "Add label" in interface
+
 ### Inference tool
 
 The input images folder specified in '--input_folder' must contain images in jpg format. 
