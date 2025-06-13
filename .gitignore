@@ -3,3 +3,4 @@ whole_dataset/
 output/
 .DS_Store
 model/.DS_Store
+_pycache_
