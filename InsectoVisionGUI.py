@@ -46,7 +46,7 @@ class EntoBox:
 
     def __init__(self,name,img_path,gui,bboxes_path = None):
         self.name = name
-        print("Loading "+name)
+        #print("Loading "+name)
 
         #Get the image
         img = Image.open(os.path.join(img_path,name+".jpg"))        
@@ -173,7 +173,7 @@ class GUI:
         self.root.config(menu=menubar)
 
         filemenu = Menu(menubar,tearoff=False)
-        filemenu.add_command(label="Select images folder...",command=self.choose_input)
+        filemenu.add_command(label="Select image folder...",command=self.choose_input)
         filemenu.add_command(label="Create folder from URL list...",command=self.choose_url_list_input)
         filemenu.add_command(label="Open selected images",command=self.load_images)
         filemenu.add_command(label="Scan selected images",command=self.run_inference)
@@ -282,7 +282,7 @@ class GUI:
         inference_pipeline.main(args)
 
         for file in os.listdir("output"):
-            print(file)
+            #print(file)
             move(os.path.join("output",file),os.path.join(self.source_path,"raw_ai_labels"))
 
         if os.path.exists("output"):
@@ -425,7 +425,6 @@ class GUI:
         ttk.Button(self.frame,text="Combine boxes",command=self.combine,width=BWIDTH).grid(column=6,row=1,padx=PADX)
         ttk.Button(self.frame,text="New box",command=self.start_draw,width=BWIDTH).grid(column=6,row=0,padx=PADX)
         ttk.Button(self.frame,text="Add label",command=self.add_label,width=BWIDTH).grid(column=7,row=0,padx=PADX)
-        #ttk.Button(self.frame,text="Select Group",command=self.select_group,width=BWIDTH).grid(column=7,row=1,padx=PADX)
 
         ttk.Button(self.frame,text="Save",command=self.save,width=BWIDTH).grid(column=9,row=1,padx=PADX)
         self.save_label = ttk.Label(self.frame)
