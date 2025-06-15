@@ -189,6 +189,8 @@ class GUI:
         #filemenu.add_command(label="Select annotation save folder...",command=self.choose_output)
         filemenu.add_command(label="Summarize saved boxes",command=self.summarize)
         filemenu.add_command(label="Crop specimens from current box",command=self.crop_current)
+        filemenu.add_separator()
+        filemenu.add_command(label="Parameters",command=self.model_params)
         menubar.add_cascade(label="File",menu=filemenu)
 
         editmenu = Menu(menubar,tearoff=False)
@@ -198,11 +200,10 @@ class GUI:
         editmenu.add_command(label="Add label",command=self.add_label)
         menubar.add_cascade(label="Edit",menu=editmenu)
 
-        aimenu = Menu(menubar,tearoff=False)
-        aimenu.add_command(label="Model parameters",command=self.model_params)
-        aimenu.add_command(label="Open images for active learning",command=self.open_AL)
-        aimenu.add_command(label="Retrain model with new annotations")
-        menubar.add_cascade(label="AI",menu=aimenu)
+        #aimenu = Menu(menubar,tearoff=False)
+        #aimenu.add_command(label="Open images for active learning",command=self.open_AL)
+        #aimenu.add_command(label="Retrain model with new annotations")
+        #menubar.add_cascade(label="AI",menu=aimenu)
         
     def choose_input(self):
         path = fd.askdirectory()
@@ -362,7 +363,9 @@ class GUI:
         
         def reset_params():
             self.model = DEFAULT_MODEL
+            model_label.config(text="Model: "+ self.model)
             self.detection_only = True
+            detonly.set(self.detection_only)
         
         ttk.Button(tfrm,text="Reset Default",command=reset_params).grid(row=2,column=0)
         ttk.Button(tfrm,text="Confirm",command=conf_label).grid(row=2,column=1)
