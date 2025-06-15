@@ -82,6 +82,7 @@ In the "File" tab:
                            in the saved boxes, as well as the total amount.
  -"Crop specimens from current box": creates a "crops" directory and saves in it a croped image of each specimen
                                     and paper tag with a bounding box.
+ -"Parameters": allows to choose the detection model and wether to enable the post detection classifier
 
 With an image open:
  -Left click on a bounding box: selects the bounding box (shown in blue)
