@@ -11,6 +11,7 @@ from PIL import ImageTk, Image
 
 #Constants
 DEFAULT_LABEL = "Insect"
+DEFAULT_MODEL = os.path.join("model","final_23.pt")
 
 #Drawing reasons
 NEW_BBOX = 1
@@ -62,6 +63,7 @@ class EntoBox:
 
     def get_bboxes(self,bboxes_path):
         if(os.path.isfile(os.path.join(bboxes_path,self.name+".txt"))):
+            self.bboxes = []
             txt = open(os.path.join(bboxes_path,self.name+".txt"))
 
             #Compute bbox coordinates from yolo notation
@@ -140,6 +142,9 @@ class GUI:
     raw_path = None
     label_path = None
 
+    model = DEFAULT_MODEL
+    detection_only = True
+
     n_img = 0
     conf_threshold = 0.85
     crop_margin = 1.1
@@ -194,6 +199,7 @@ class GUI:
         menubar.add_cascade(label="Edit",menu=editmenu)
 
         aimenu = Menu(menubar,tearoff=False)
+        aimenu.add_command(label="Model parameters",command=self.model_params)
         aimenu.add_command(label="Open images for active learning",command=self.open_AL)
         aimenu.add_command(label="Retrain model with new annotations")
         menubar.add_cascade(label="AI",menu=aimenu)
@@ -273,27 +279,42 @@ class GUI:
 
         if(not self.started):
            self.start()
+        
+        self.current = 0
+        self.show_image(0)
 
         return need_inf
 
     def run_inference(self):
-        sys.argv = ["inference_pipeline.py", '--input_folder' , self.img_path, "--write_conf","--silent"]
+        #print("img_path = "+self.img_path)
+        sys.argv = ["inference_pipeline.py", '--input_folder' , self.img_path, "--write_conf","--silent","--model"]
+        sys.argv.append(self.model)
+        if self.detection_only: 
+            sys.argv.append("--detection_only")
+        
+        print(sys.argv)
+
+        for file in os.listdir(self.raw_path):
+            if file.endswith(".txt"):
+                os.remove(os.path.join(self.raw_path,file))
+
+        
         args = inference_pipeline.parse_args()
         inference_pipeline.main(args)
 
         for file in os.listdir("output"):
             #print(file)
-            move(os.path.join("output",file),os.path.join(self.source_path,"raw_ai_labels"))
+            move(os.path.join(os.getcwd(),"output",file),os.path.join(self.source_path,"raw_ai_labels"))
 
-        if os.path.exists("output"):
-            rmtree("output")
+        os.rmdir("output")
+
+        #print("inference done")
 
         for eb in self.entoboxes:
             eb.get_bboxes(self.raw_path)
         
         if self.entoboxes != []:
-            for bbox in self.entoboxes[self.current].bboxes:
-                bbox.draw(self)
+            self.show_image(self.current)
 
     def quick_open(self,use_url = False):
         if use_url:
@@ -313,6 +334,41 @@ class GUI:
 
         self.load_images(chosen[:self.al_nbr])
 
+    def model_params(self):
+        
+        def select_model():
+            self.model = fd.askopenfilename(initialdir="model",filetypes=[("PyTorch model file",".pt")])
+            model_label.config(text="Model: "+ self.model)
+
+        param_window = Toplevel()
+        param_window.config(width=600,height=100)
+        param_window.geometry('+500+500')
+        tfrm = ttk.Frame(param_window, padding=5)
+        tfrm.grid()
+
+        model_label = ttk.Label(tfrm,text="Model: "+ self.model)
+        model_label.grid(row=0,column=0)
+        ttk.Button(tfrm,text="Select model",command=select_model).grid(row=0,column=1)
+        
+        
+        detonly = BooleanVar()
+        detonly.set(self.detection_only)
+        ttk.Checkbutton(tfrm,text="Post-detection classifier",variable=detonly,onvalue=False,offvalue=True).grid(row=1,column=0)
+        
+
+        def conf_label():
+            self.detection_only = detonly.get()
+            param_window.destroy()
+        
+        def reset_params():
+            self.model = DEFAULT_MODEL
+            self.detection_only = True
+        
+        ttk.Button(tfrm,text="Reset Default",command=reset_params).grid(row=2,column=0)
+        ttk.Button(tfrm,text="Confirm",command=conf_label).grid(row=2,column=1)
+        
+        param_window.focus()
+        
     def summarize(self):
         
         types = {}
@@ -453,12 +509,14 @@ class GUI:
 
 
     def next(self):
-        self.change_img(1)
+        self.show_image(self.current+1)
+
     def prev(self):
-        self.change_img(-1)
-    def change_img(self,n):
+        self.show_image(self.current-1)
+
+    def show_image(self,n):
         self.save_label.config(text="")
-        self.current = (self.current+n)%self.n_img
+        self.current = (n)%self.n_img
         self.title_label.config(text="Image "+str(self.current+1)+" /"+str(self.n_img))
         self.canvas.delete(self.img_id)
         for bbox in self.drawn_bboxes:
@@ -496,7 +554,7 @@ class GUI:
                 bbox.status = SURE
             elif bbox.status == SURE and bbox.conf < self.conf_threshold:
                 bbox.status = DOUBT 
-        self.change_img(0) #Redraws current entobox 
+        self.show_image(self.current) #Redraws current entobox 
         self.update_count()
 
     def update_count(self):
@@ -508,12 +566,10 @@ class GUI:
 
 
     def on_click(self,e): 
-
         if self.drawing == False:
             self.select(e)
 
     def on_move_M1_held(self,e):
-
         if not self.drawing:
             self.draw_coord = [e.x,e.y]
             self.drawing = True
@@ -521,7 +577,6 @@ class GUI:
         self.draw_indic = self.canvas.create_rectangle(self.draw_coord[0],self.draw_coord[1],e.x,e.y,outline=COLORS[SELECTED],width=4)
         
     def on_M1_release(self,e):
-
         if self.drawing:
             self.canvas.delete(self.draw_indic)
             x1 = min(self.draw_coord[0],e.x)
@@ -704,10 +759,9 @@ class GUI:
         return(int(x*scale),int(y*scale))
 
     def on_close(self):
-        #if os.path.exists("output"):
-            #rmtree("output")
         self.root.destroy()
-
+        if os.path.exists("output"):
+            rmtree("output")
 
 
 if __name__ == "__main__":
